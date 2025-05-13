@@ -71,13 +71,38 @@ public class HlsParser {
         parse(chosen.getUri());
     }
 
+    /**
+     * Parses a media playlist (M3U8 format).
+     * <p>
+     * This method processes the content of a media playlist and extracts relevant information such as segment URIs,
+     * durations, encryption details, and other tags. It ensures that the playlist starts with the #EXTM3U tag, and handles
+     * various other tags like #EXT-X-TARGETDURATION, #EXTINF, #EXT-X-KEY, and #EXT-X-ENDLIST.
+     * If strict mode is enabled, unknown tags will result in an exception.
+     * </p>
+     *
+     * @param content The content of the playlist as a string.
+     * @param baseUri The base URI to resolve relative segment URIs.
+     * @return A MediaPlaylist object containing parsed segments and metadata.
+     * @throws IOException If there is an error parsing the playlist or if an unexpected tag is encountered in strict mode.
+     */
     private MediaPlaylist parseMediaPlaylist(String content, URI baseUri) throws IOException {
         MediaPlaylist playlist = new MediaPlaylist();
         String[] lines = content.split("\\n");
         double currentDuration = 0;
         String currentTitle = "";
 
+        // Check if #EXTM3U exists at the beginning.
+        if (!lines[0].startsWith("#EXTM3U")) {
+            throw new IOException("Invalid playlist: Missing #EXTM3U at the start.");
+        }
+
+        // Parse each line of the playlist.
         for (String line : lines) {
+            // Ignore #EXTM3U as it just marks the playlist start.
+            if (line.startsWith("#EXTM3U")) {
+                continue;  // Skip processing this line.
+            }
+
             if (line.startsWith("#EXT-X-TARGETDURATION")) {
                 playlist.targetDuration = Double.parseDouble(line.split(":")[1]);
             } else if (line.startsWith("#EXTINF")) {

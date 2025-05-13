@@ -158,6 +158,61 @@ class HlsParserTest {
         assertEquals(1, result.segments.size());
     }
 
+    @Test
+    void testStrictModeHandlesExtM3UGracefully() throws IOException {
+        String playlist = "#EXTM3U\n" +
+                "#EXT-X-TARGETDURATION:10\n" +
+                "#EXTINF:9.0,\n" +
+                "segment1.ts\n" +
+                "#EXTINF:9.0,\n" +
+                "segment2.ts\n" +
+                "#EXT-X-ENDLIST";
+
+        URI baseUri = URI.create("http://test/");
+
+        HlsParser parser = new HlsParser(new DummyCallback(), new MockDownloader(playlist), true);
+        HlsParser.MediaPlaylist result = parser.parse(baseUri);
+
+        assertNotNull(result);
+        assertEquals(2, result.segments.size());
+    }
+
+    @Test
+    void testMissingExtM3UGShouldThrow() throws IOException {
+        String playlist =
+                "#EXT-X-TARGETDURATION:10\n" +
+                        "#EXTINF:9.0,\n" +
+                        "segment1.ts\n" +
+                        "#EXTINF:9.0,\n" +
+                        "segment2.ts\n" +
+                        "#EXT-X-ENDLIST";
+
+        URI baseUri = URI.create("http://test/");
+
+        HlsParser parser = new HlsParser(new DummyCallback(), new MockDownloader(playlist), true);
+
+        IOException ex = assertThrows(IOException.class, () -> parser.parse(baseUri));
+        assertTrue(ex.getMessage().contains("Invalid playlist: Missing #EXTM3U"));
+    }
+
+    @Test
+    void testInvalidExtM3UGShouldThrow() throws IOException {
+        String playlist = "#EXTMU3U\n" +
+                "#EXT-X-TARGETDURATION:10\n" +
+                "#EXTINF:9.0,\n" +
+                "segment1.ts\n" +
+                "#EXTINF:9.0,\n" +
+                "segment2.ts\n" +
+                "#EXT-X-ENDLIST";
+
+        URI baseUri = URI.create("http://test/");
+
+        HlsParser parser = new HlsParser(new DummyCallback(), new MockDownloader(playlist), true);
+
+        IOException ex = assertThrows(IOException.class, () -> parser.parse(baseUri));
+        assertTrue(ex.getMessage().contains("Invalid playlist: Missing #EXTM3U"));
+    }
+
     static class MockDownloader implements HlsParser.Downloader {
         final String content;
 
