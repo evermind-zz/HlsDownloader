@@ -36,15 +36,19 @@ public class HlsParser {
      *
      * @param uri URI of the playlist to parse.
      * @throws IOException if downloading or parsing fails.
+     *
+     * @return in case of Media playlist the MediaPlaylist, for master playlist null
      */
-    public void parse(URI uri) throws IOException {
+    public MediaPlaylist parse(URI uri) throws IOException {
         String content = downloader.download(uri);
         if (content.contains("#EXT-X-STREAM-INF")) {
             parseMasterPlaylist(content, uri);
+            return null; // master playlist doesn't return anything directly
         } else {
-            parseMediaPlaylist(content, uri);
+            return parseMediaPlaylist(content, uri);
         }
     }
+
 
     private void parseMasterPlaylist(String content, URI baseUri) throws IOException {
         List<VariantStream> variants = new ArrayList<>();
@@ -67,7 +71,7 @@ public class HlsParser {
         parse(chosen.getUri());
     }
 
-    private void parseMediaPlaylist(String content, URI baseUri) throws IOException {
+    private MediaPlaylist parseMediaPlaylist(String content, URI baseUri) throws IOException {
         MediaPlaylist playlist = new MediaPlaylist();
         String[] lines = content.split("\\n");
         double currentDuration = 0;
@@ -101,6 +105,7 @@ public class HlsParser {
 
         validatePlaylist(playlist);
         // Further processing/callback with MediaPlaylist if needed
+        return playlist;
     }
 
     private void validatePlaylist(MediaPlaylist playlist) {
@@ -204,10 +209,10 @@ public class HlsParser {
      * Represents a parsed media playlist.
      */
     public static class MediaPlaylist {
-        List<Segment> segments = new ArrayList<>();
+        public List<Segment> segments = new ArrayList<>();
         double targetDuration;
         boolean endList;
-        EncryptionInfo encryptionInfo;
+        public EncryptionInfo encryptionInfo;
 
         public void addSegment(Segment segment) {
             segments.add(segment);
@@ -222,9 +227,9 @@ public class HlsParser {
      * Represents encryption information for media segments.
      */
     public static class EncryptionInfo {
-        String method;
-        URI uri;
-        String iv;
+        public String method;
+        public URI uri;
+        public String iv;
 
         public EncryptionInfo(String method, URI uri, String iv) {
             this.method = method;
