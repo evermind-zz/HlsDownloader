@@ -1,0 +1,14 @@
+[versions]
+junit5 = "5.12.1"
+junit-platform = "1.10.0"
+
+
+[libraries]
+
+junit-bom = { group = "org.junit", name = "junit-bom", version.ref = "junit5" }
+
+junit-jupiter-engine = { module = "org.junit.jupiter:junit-jupiter-engine", version.ref = "junit5" }
+junit-jupiter-params = { module = "org.junit.jupiter:junit-jupiter-params", version.ref = "junit5" }
+junit-jupiter-api = { module = "org.junit.jupiter:junit-jupiter-api", version.ref = "junit5" }
+
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version.ref = "junit-platform" }

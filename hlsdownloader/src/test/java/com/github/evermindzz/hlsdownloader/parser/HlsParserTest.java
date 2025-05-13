@@ -1,0 +1,116 @@
+package com.github.evermindzz.hlsdownloader.parser;
+
+import com.github.evermindzz.hlsdownloader.parser.HlsParser.VariantStream;
+
+import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.fail;
+
+class HlsParserTest {
+    private static URI toDataUri(String content) {
+        return URI.create("data:application/vnd.apple.mpegurl;base64," +
+                java.util.Base64.getEncoder().encodeToString(content.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static HlsParser.Downloader getFakeDownloader(String mediaContent) {
+        HlsParser.Downloader fakeDownloader = uri -> {
+            if (uri.toString().endsWith("media.m3u8")) {
+                return mediaContent;
+            } else {
+                throw new IOException("Unexpected URI");
+            }
+        };
+        return fakeDownloader;
+    }
+
+    @Test
+    void testMasterPlaylistParsingWithCallback() throws Exception {
+        String masterContent = "#EXTM3U\n" +
+                "#EXT-X-STREAM-INF:BANDWIDTH=1280000,RESOLUTION=640x360,CODECS=\"avc1.42e01e,mp4a.40.2\"\n" +
+                "media360.m3u8\n" +
+                "#EXT-X-STREAM-INF:BANDWIDTH=2560000,RESOLUTION=1280x720,CODECS=\"avc1.4d401f,mp4a.40.2\"\n" +
+                "media720.m3u8";
+
+        String mediaContent = "#EXTM3U\n" +
+                "#EXT-X-TARGETDURATION:10\n" +
+                "#EXTINF:9.0,\n" +
+                "segment1.ts\n" +
+                "#EXTINF:10.0,\n" +
+                "segment2.ts\n" +
+                "#EXT-X-ENDLIST";
+
+        URI dummyMasterUri = URI.create("http://example.com/media.m3u8");
+        URI mediaUri = toDataUri(mediaContent);
+
+        HlsParser.Downloader fakeDownloader = getFakeDownloader(mediaContent);
+
+        HlsParser parser = new HlsParser(variants -> {
+            assertEquals(2, variants.size());
+            HlsParser.VariantStream selected = variants.get(1); // Simulate user picking the 720p
+            assertEquals("1280x720", selected.getResolution());
+            // Replace variant URI with test media URI
+            return new VariantStream(mediaUri, selected.getBandwidth(), selected.getResolution(), selected.getCodecs());
+        }, fakeDownloader);
+
+        parser.parse(dummyMasterUri); // Will parse master, callback, then media
+    }
+
+    @Test
+    void testMediaPlaylistParsingValidation() throws Exception {
+        String mediaContent = "#EXTM3U\n" +
+                "#EXT-X-TARGETDURATION:8\n" +
+                "#EXTINF:9.0,\n" +
+                "segment1.ts\n" +
+                "#EXTINF:7.5,\n" +
+                "segment2.ts\n" +
+                "#EXT-X-ENDLIST";
+
+
+        URI dummyUri = URI.create("http://example.com/media.m3u8");
+
+        HlsParser.Downloader fakeDownloader = getFakeDownloader(mediaContent);
+
+        HlsParser parser = new HlsParser(variants -> {
+            fail("Should not call variant selector for media playlist");
+            return null;
+        }, fakeDownloader);
+
+        parser.parse(dummyUri); // Should log warning due to duration > target
+    }
+
+    @Test
+    void testEncryptedMediaPlaylistParsing() throws Exception {
+        String playlistContent = "#EXTM3U\n" +
+                "#EXT-X-TARGETDURATION:10\n" +
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0xabcdef\n" +
+                "#EXTINF:9.0,\n" +
+                "segment1.ts\n" +
+                "#EXT-X-ENDLIST";
+
+        URI testUri = URI.create("http://test/media.m3u8");
+
+        HlsParser.Downloader fakeDownloader = uri -> {
+            if (uri.toString().endsWith("media.m3u8")) {
+                return playlistContent;
+            } else {
+                throw new IllegalArgumentException("Unexpected URI");
+            }
+        };
+
+        HlsParser parser = new HlsParser(
+                variants -> { fail("Should not be called for media playlist"); return null; },
+                fakeDownloader
+        );
+
+        // Here, we'd want to access the MediaPlaylist instance — optional enhancement: callback or accessor
+        parser.parse(testUri);
+        // If MediaPlaylist was returned or exposed, add assertions like:
+        // assertEquals("AES-128", playlist.getEncryptionInfo().method);
+        // assertEquals(URI.create("https://example.com/key.key"), playlist.getEncryptionInfo().uri);
+    }
+}
