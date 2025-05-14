@@ -1,6 +1,7 @@
 package com.github.evermindzz.hlsdownloader.parser;
 
 import com.github.evermindzz.hlsdownloader.parser.HlsParser.VariantStream;
+import com.github.evermindzz.hlsdownloader.parser.HlsParser.EncryptionInfo;
 
 import org.junit.jupiter.api.Test;
 
@@ -81,6 +82,11 @@ class HlsParserTest {
                 "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0xabcdef\n" +
                 "#EXTINF:9.0,\n" +
                 "segment1.ts\n" +
+                "#EXTINF:9.0,\n" +
+                "segment2.ts\n" +
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0x123456\n" +
+                "#EXTINF:9.0,\n" +
+                "segment3.ts\n" +
                 "#EXT-X-ENDLIST";
 
         URI testUri = URI.create("http://test/media.m3u8");
@@ -94,11 +100,28 @@ class HlsParserTest {
                 true
         );
 
-        // Here, we'd want to access the MediaPlaylist instance — optional enhancement: callback or accessor
-        parser.parse(testUri);
-        // If MediaPlaylist was returned or exposed, add assertions like:
-        // assertEquals("AES-128", playlist.getEncryptionInfo().method);
-        // assertEquals(URI.create("https://example.com/key.key"), playlist.getEncryptionInfo().uri);
+        HlsParser.MediaPlaylist result = parser.parse(testUri);
+        assertNotNull(result);
+        assertNotNull(result.getSegments());
+        assertEquals(3, result.getSegments().size());
+        HlsParser.Segment segment = result.getSegments().get(0);
+        EncryptionInfo encryptionInfo = segment.getEncryptionInfo();
+        assertNotNull(encryptionInfo);
+        assertEquals("AES-128", encryptionInfo.getMethod());
+        assertEquals(URI.create("https://example.com/key.key"), encryptionInfo.getUri());
+        assertEquals("0xabcdef", encryptionInfo.getIv());
+
+        // should contain same encryption info that first segment
+        segment = result.getSegments().get(1);
+        EncryptionInfo encryptionInfo2 = segment.getEncryptionInfo();
+        assertEquals(encryptionInfo2, encryptionInfo);
+
+        segment = result.getSegments().get(2);
+        encryptionInfo = segment.getEncryptionInfo();
+        assertNotNull(encryptionInfo);
+        assertEquals("AES-128", encryptionInfo.getMethod());
+        assertEquals(URI.create("https://example.com/key.key"), encryptionInfo.getUri());
+        assertEquals("0x123456", encryptionInfo.getIv());
     }
 
     @Test
@@ -118,11 +141,13 @@ class HlsParserTest {
         HlsParser.MediaPlaylist result = parser.parse(baseUri);
 
         assertNotNull(result);
-        assertEquals(2, result.segments.size());
-        assertNotNull(result.encryptionInfo);
-        assertEquals("AES-128", result.encryptionInfo.method);
-        assertEquals("http://test/key.key", result.encryptionInfo.uri.toString());
-        assertEquals("0xabcdef", result.encryptionInfo.iv);
+        assertEquals(2, result.getSegments().size());
+        HlsParser.Segment segment = result.getSegments().get(0);
+        EncryptionInfo encryptionInfo = segment.getEncryptionInfo();
+        assertNotNull(encryptionInfo);
+        assertEquals("AES-128", encryptionInfo.getMethod());
+        assertEquals("http://test/key.key", encryptionInfo.getUri().toString());
+        assertEquals("0xabcdef", encryptionInfo.getIv());
     }
 
     @Test
@@ -155,7 +180,7 @@ class HlsParserTest {
         HlsParser.MediaPlaylist result = parser.parse(baseUri);
 
         assertNotNull(result);
-        assertEquals(1, result.segments.size());
+        assertEquals(1, result.getSegments().size());
     }
 
     @Test
@@ -174,7 +199,7 @@ class HlsParserTest {
         HlsParser.MediaPlaylist result = parser.parse(baseUri);
 
         assertNotNull(result);
-        assertEquals(2, result.segments.size());
+        assertEquals(2, result.getSegments().size());
     }
 
     @Test

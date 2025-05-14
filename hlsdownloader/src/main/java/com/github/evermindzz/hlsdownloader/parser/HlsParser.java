@@ -1,17 +1,17 @@
 package com.github.evermindzz.hlsdownloader.parser;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
 import java.net.URI;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * HlsParser is a lightweight parser for both Master and Media HLS playlists.
- * It supports variant stream selection via callback and AES-128 encryption metadata parsing.
+ * A parser for HLS playlists. Supports both master and media playlists,
+ * and returns fully parsed MediaPlaylist objects.
  */
 public class HlsParser {
     private final MasterPlaylistSelectionCallback callback;
@@ -22,7 +22,7 @@ public class HlsParser {
      * Constructs a new HlsParser.
      *
      * @param callback    Callback to select a stream variant when parsing master playlists.
-     * @param downloader  Downloader strategy to fetch playlist content.
+     * @param downloader  Downloader strategy to fetch content.
      * @param strictMode  If true, unknown tags will throw exceptions. Otherwise, they're ignored.
      */
     public HlsParser(MasterPlaylistSelectionCallback callback, Downloader downloader, boolean strictMode) {
@@ -32,25 +32,24 @@ public class HlsParser {
     }
 
     /**
-     * Parses the given URI as either a master or media playlist.
-     *
-     * @param uri URI of the playlist to parse.
-     * @throws IOException if downloading or parsing fails.
-     *
-     * @return in case of Media playlist the MediaPlaylist, for master playlist null
+     * Parses a playlist (master or media) and returns a MediaPlaylist.
+     * @param uri URI to the playlist
+     * @return parsed MediaPlaylist
+     * @throws IOException if downloading or parsing fails
      */
     public MediaPlaylist parse(URI uri) throws IOException {
         String content = downloader.download(uri);
+        if (!content.startsWith("#EXTM3U")) {
+            throw new IOException("Invalid playlist: Missing #EXTM3U tag at the start.");
+        }
         if (content.contains("#EXT-X-STREAM-INF")) {
-            parseMasterPlaylist(content, uri);
-            return null; // master playlist doesn't return anything directly
+            return parseMasterPlaylist(content, uri);
         } else {
             return parseMediaPlaylist(content, uri);
         }
     }
 
-
-    private void parseMasterPlaylist(String content, URI baseUri) throws IOException {
+    private MediaPlaylist parseMasterPlaylist(String content, URI baseUri) throws IOException {
         List<VariantStream> variants = new ArrayList<>();
         String[] lines = content.split("\\n");
 
@@ -68,7 +67,7 @@ public class HlsParser {
         }
 
         VariantStream chosen = callback.onSelectVariant(variants);
-        parse(chosen.getUri());
+        return parse(chosen.getUri());
     }
 
     /**
@@ -90,20 +89,12 @@ public class HlsParser {
         String[] lines = content.split("\\n");
         double currentDuration = 0;
         String currentTitle = "";
+        EncryptionInfo currentEncryption = null;
 
-        // Check if #EXTM3U exists at the beginning.
-        if (!lines[0].startsWith("#EXTM3U")) {
-            throw new IOException("Invalid playlist: Missing #EXTM3U at the start.");
-        }
-
-        // Parse each line of the playlist.
         for (String line : lines) {
-            // Ignore #EXTM3U as it just marks the playlist start.
             if (line.startsWith("#EXTM3U")) {
-                continue;  // Skip processing this line.
-            }
-
-            if (line.startsWith("#EXT-X-TARGETDURATION")) {
+                continue;
+            } else if (line.startsWith("#EXT-X-TARGETDURATION")) {
                 playlist.targetDuration = Double.parseDouble(line.split(":")[1]);
             } else if (line.startsWith("#EXTINF")) {
                 String[] parts = line.split(":")[1].split(",");
@@ -112,15 +103,16 @@ public class HlsParser {
             } else if (line.startsWith("#EXT-X-KEY")) {
                 Map<String, String> attrs = parseAttributes(line);
                 String method = attrs.get("METHOD");
-                URI keyUri = baseUri.resolve(attrs.get("URI").replace("\"", ""));
-                String iv = attrs.get("IV"); // optional
-                playlist.setEncryptionInfo(new EncryptionInfo(method, keyUri, iv));
+                URI keyUri = attrs.get("URI") != null ? baseUri.resolve(attrs.get("URI").replace("\"", "")) : null;
+                String iv = attrs.get("IV");
+                currentEncryption = new EncryptionInfo(method, keyUri, iv);
             } else if (!line.startsWith("#") && !line.isEmpty()) {
                 URI segmentUri = baseUri.resolve(line);
-                playlist.addSegment(new Segment(segmentUri, currentDuration, currentTitle));
+                Segment segment = new Segment(segmentUri, currentDuration, currentTitle, currentEncryption);
+                playlist.addSegment(segment);
             } else if (line.startsWith("#EXT-X-ENDLIST")) {
                 playlist.endList = true;
-            } else if (line.startsWith("#")) {
+            } else {
                 if (strictMode) {
                     throw new IOException("Unsupported or unknown tag in strict mode: " + line);
                 }
@@ -148,18 +140,6 @@ public class HlsParser {
             attrs.put(matcher.group(1), matcher.group(2));
         }
         return attrs;
-    }
-
-    private String download(URI uri) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        HttpURLConnection conn = (HttpURLConnection) uri.toURL().openConnection();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                sb.append(line).append("\n");
-            }
-        }
-        return sb.toString();
     }
 
     // ===== Interfaces =====
@@ -197,11 +177,8 @@ public class HlsParser {
         }
 
         public URI getUri() { return uri; }
-
         public int getBandwidth() { return bandwidth; }
-
         public String getResolution() { return resolution; }
-
         public String getCodecs() { return codecs; }
 
         @Override
@@ -222,34 +199,40 @@ public class HlsParser {
         URI uri;
         double duration;
         String title;
+        EncryptionInfo encryptionInfo;
 
-        public Segment(URI uri, double duration, String title) {
+        public Segment(URI uri, double duration, String title, EncryptionInfo encryptionInfo) {
             this.uri = uri;
             this.duration = duration;
             this.title = title;
+            this.encryptionInfo = encryptionInfo;
         }
+
+        public URI getUri() { return uri; }
+        public double getDuration() { return duration; }
+        public String getTitle() { return title; }
+        public EncryptionInfo getEncryptionInfo() { return encryptionInfo; }
     }
 
     /**
      * Represents a parsed media playlist.
      */
     public static class MediaPlaylist {
-        public List<Segment> segments = new ArrayList<>();
+        List<Segment> segments = new ArrayList<>();
         double targetDuration;
         boolean endList;
-        public EncryptionInfo encryptionInfo;
 
         public void addSegment(Segment segment) {
             segments.add(segment);
         }
 
-        public void setEncryptionInfo(EncryptionInfo info) {
-            this.encryptionInfo = info;
-        }
+        public List<Segment> getSegments() { return segments; }
+        public double getTargetDuration() { return targetDuration; }
+        public boolean isEndList() { return endList; }
     }
 
     /**
-     * Represents encryption information for media segments.
+     * Represents encryption information for a segment.
      */
     public static class EncryptionInfo {
         public String method;
@@ -261,5 +244,9 @@ public class HlsParser {
             this.uri = uri;
             this.iv = iv;
         }
+
+        public String getMethod() { return method; }
+        public URI getUri() { return uri; }
+        public String getIv() { return iv; }
     }
 }
