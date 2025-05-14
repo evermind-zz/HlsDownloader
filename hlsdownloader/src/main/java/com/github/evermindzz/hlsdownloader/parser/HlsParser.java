@@ -219,7 +219,7 @@ public class HlsParser {
      */
     public static class MediaPlaylist {
         List<Segment> segments = new ArrayList<>();
-        double targetDuration;
+        public double targetDuration;
         boolean endList;
 
         public void addSegment(Segment segment) {
