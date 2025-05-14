@@ -22,10 +22,10 @@ public class HlsMediaProcessor {
     private final String stateFile; // File to store download state
     private final DownloadProgressCallback progressCallback;
     private final PostProcessingCallback postProcessingCallback;
-    private final AtomicBoolean isPaused;
-    private final AtomicBoolean isCancelled;
+    protected final AtomicBoolean isPaused;
+    protected final AtomicBoolean isCancelled;
     private MediaPlaylist playlist; // Store playlist for resuming
-    private int lastDownloadedSegmentIndex; // Track progress
+    int lastDownloadedSegmentIndex; // Track progress
 
     /**
      * Constructs a new HlsMediaProcessor.
@@ -114,7 +114,7 @@ public class HlsMediaProcessor {
      * @param fileName   File path to save the segment.
      * @throws IOException If downloading fails.
      */
-    private void downloadSegment(URI segmentUri, String fileName) throws IOException {
+    void downloadSegment(URI segmentUri, String fileName) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) segmentUri.toURL().openConnection();
         connection.setRequestMethod("GET");
         connection.setConnectTimeout(10000);
@@ -141,7 +141,7 @@ public class HlsMediaProcessor {
      * @param segmentCount Number of segments to combine.
      * @throws IOException If file operations fail.
      */
-    private void combineSegments(int segmentCount) throws IOException {
+    void combineSegments(int segmentCount) throws IOException {
         try (FileOutputStream fos = new FileOutputStream(outputFile, true)) {
             for (int i = 1; i <= segmentCount; i++) {
                 String segmentFile = outputDir + "/segment_" + i + ".ts";
@@ -183,7 +183,7 @@ public class HlsMediaProcessor {
     /**
      * Saves the current download state to a file.
      */
-    private void saveState() throws IOException {
+    protected void saveState() throws IOException {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(stateFile))) {
             writer.write(String.valueOf(lastDownloadedSegmentIndex));
         }
