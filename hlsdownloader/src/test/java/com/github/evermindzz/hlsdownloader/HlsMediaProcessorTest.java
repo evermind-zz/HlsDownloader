@@ -7,12 +7,14 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -25,7 +27,7 @@ class HlsMediaProcessorTest {
     private String outputFile;
     private String stateFile;
     private HlsMediaProcessor downloader;
-    private HlsParser parser;
+    private static HlsParser parser;
 
     @BeforeEach
     void setUp() throws IOException {
@@ -57,7 +59,7 @@ class HlsMediaProcessorTest {
         );
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new DecryptingSegmentDownloader(),
+                new DecryptingSegmentDownloader(outputDir),
                 null, // Use default StateManager
                 null, // Use default SegmentCombiner
                 (progress, total) -> {},
@@ -91,7 +93,7 @@ class HlsMediaProcessorTest {
         AtomicInteger segmentCounter = new AtomicInteger(0);
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new DecryptingSegmentDownloader(),
+                new DecryptingSegmentDownloader(outputDir),
                 null, // Use default StateManager
                 null, // Use default SegmentCombiner
                 (progress, total) -> {
@@ -133,7 +135,7 @@ class HlsMediaProcessorTest {
         AtomicInteger segmentCounter = new AtomicInteger(0);
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new DecryptingSegmentDownloader(),
+                new DecryptingSegmentDownloader(outputDir),
                 null, // Use default StateManager
                 null, // Use default SegmentCombiner
                 (progress, total) -> {
@@ -207,7 +209,7 @@ class HlsMediaProcessorTest {
                 true
         );
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new DecryptingSegmentDownloader(),
+                new DecryptingSegmentDownloader(outputDir),
                 null, // Use default StateManager
                 null, // Use default SegmentCombiner
                 (progress, total) -> {},
@@ -244,7 +246,7 @@ class HlsMediaProcessorTest {
         // Mock key downloader
         MockKeyDownloader keyDownloader = new MockKeyDownloader("key1".getBytes());
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new DecryptingSegmentDownloader(keyDownloader),
+                new DecryptingSegmentDownloader(outputDir, keyDownloader),
                 null,
                 null,
                 (progress, total) -> {},
@@ -283,7 +285,7 @@ class HlsMediaProcessorTest {
                 new byte[][] {"key1".getBytes(), "key1".getBytes(), "key2".getBytes()} // Key change at segment 3
         );
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new DecryptingSegmentDownloader(keyDownloader),
+                new DecryptingSegmentDownloader(outputDir, keyDownloader),
                 null,
                 null,
                 (progress, total) -> {},
@@ -349,14 +351,16 @@ class HlsMediaProcessorTest {
 
     private static class DecryptingSegmentDownloader implements HlsMediaProcessor.SegmentDownloader {
         private final MockKeyDownloader keyDownloader;
+        private String outputDir;
         private int segmentIndex = 0;
 
-        DecryptingSegmentDownloader() {
-            this(new MockKeyDownloader(null));
+        DecryptingSegmentDownloader(String outputDir) {
+            this(outputDir, new MockKeyDownloader((byte[]) null));
         }
 
-        DecryptingSegmentDownloader(MockKeyDownloader keyDownloader) {
-            this.keyDownloader = keyDownloader != null ? keyDownloader : new MockKeyDownloader(null);
+        DecryptingSegmentDownloader(String outputDir, MockKeyDownloader keyDownloader) {
+            this.outputDir = outputDir;
+            this.keyDownloader = keyDownloader != null ? keyDownloader : new MockKeyDownloader((byte[]) null);
         }
 
         @Override
@@ -401,7 +405,7 @@ class HlsMediaProcessorTest {
             if (keys == null) {
                 return "defaultkey".getBytes(); // Default key if none provided
             }
-            int index = Integer.parseInt(uri.getHost().replace("example.com/key", "")) - 1;
+            int index = Integer.parseInt(uri.getPath().replaceAll(".key", ""));
             return keys[Math.min(index, keys.length - 1)];
         }
     }
