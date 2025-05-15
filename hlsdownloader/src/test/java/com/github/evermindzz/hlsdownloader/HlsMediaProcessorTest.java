@@ -56,7 +56,10 @@ class HlsMediaProcessorTest {
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
                 new TestSegmentDownloader(),
+                null, // Use default StateManager
+                null, // Use default SegmentCombiner
                 (progress, total) -> {},
+                () -> {},
                 () -> {}
         );
     }
@@ -87,6 +90,8 @@ class HlsMediaProcessorTest {
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
                 new TestSegmentDownloader(),
+                null, // Use default StateManager
+                null, // Use default SegmentCombiner
                 (progress, total) -> {
                     if (segmentCounter.incrementAndGet() == 1) {
                         downloader.pause(); // Pause immediately after first segment
@@ -95,7 +100,8 @@ class HlsMediaProcessorTest {
                         firstSegmentLatch.countDown(); // Signal test thread
                     }
                 },
-                () -> completionLatch.countDown()
+                () -> completionLatch.countDown(),
+                () -> {}
         );
 
         Thread downloadThread = new Thread(() -> {
@@ -126,6 +132,8 @@ class HlsMediaProcessorTest {
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
                 new TestSegmentDownloader(),
+                null, // Use default StateManager
+                null, // Use default SegmentCombiner
                 (progress, total) -> {
                     if (segmentCounter.incrementAndGet() == 1) {
                         downloader.cancel(); // Cancel immediately after first segment
@@ -134,6 +142,7 @@ class HlsMediaProcessorTest {
                         firstSegmentLatch.countDown(); // Signal test thread
                     }
                 },
+                () -> {},
                 () -> {}
         );
 
@@ -173,8 +182,8 @@ class HlsMediaProcessorTest {
     void testIOExceptionDuringDownload() throws IOException {
         MockDownloader mockDownloader = new MockDownloader("#EXTM3U\n#EXTINF:9.0,\nsegment1.ts\n#EXTINF:9.0,\n") {
             @Override
-            public String download(URI uri) {
-                throw new RuntimeException("Simulated network error"); // Changed to IOException for consistency
+            public String download(URI uri) throws IOException {
+                throw new IOException("Simulated network error");
             }
         };
         parser = new HlsParser(
@@ -184,20 +193,23 @@ class HlsMediaProcessorTest {
         );
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
                 new TestSegmentDownloader(),
+                null, // Use default StateManager
+                null, // Use default SegmentCombiner
                 (progress, total) -> {},
+                () -> {},
                 () -> {}
         );
 
         try {
             downloader.download(URI.create("http://test/media.m3u8"));
             fail("Should throw IOException");
-        } catch (RuntimeException e) {
+        } catch (IOException e) {
             assertTrue(e.getMessage().contains("Simulated network error"));
         }
 
         assertFalse(Files.exists(Path.of(outputFile)));
         assertFalse(Files.exists(Path.of(outputDir + "/segment_1.ts")));
-        assertTrue(Files.exists(Path.of(stateFile)));
+        assertTrue(Files.exists(Path.of(stateFile))); // Exists due to saveState() after loadState()
         assertEquals(-1, readStateFile());
     }
 
@@ -239,7 +251,7 @@ class HlsMediaProcessorTest {
         }
 
         @Override
-        public String download(URI uri) {
+        public String download(URI uri) throws IOException {
             return content;
         }
     }
