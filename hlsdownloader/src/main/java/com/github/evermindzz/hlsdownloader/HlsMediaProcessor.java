@@ -116,6 +116,14 @@ public class HlsMediaProcessor {
             progressCallback.onProgressUpdate(progressPercent, segmentCount);
         }
 
+        // Verify all required segment files exist before combining
+        for (int i = 1; i <= segmentCount; i++) {
+            String segmentFileName = outputDir + "/segment_" + i + ".ts";
+            if (!Files.exists(Paths.get(segmentFileName))) {
+                throw new IOException("Required segment file missing: " + segmentFileName);
+            }
+        }
+
         // Combine segments using the SegmentCombiner
         segmentCombiner.combineSegments(outputDir, outputFile, segmentCount);
 
