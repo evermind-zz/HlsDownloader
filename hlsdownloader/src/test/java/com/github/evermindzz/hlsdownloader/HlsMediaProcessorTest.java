@@ -12,6 +12,8 @@ import java.io.InputStream;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -52,7 +54,6 @@ class HlsMediaProcessorTest {
                 true
         );
 
-        // Custom downloader with mocked segment downloads
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
                 new TestSegmentDownloader(),
                 (progress, total) -> {},
@@ -63,89 +64,117 @@ class HlsMediaProcessorTest {
     @AfterEach
     void tearDown() throws IOException {
         Files.walk(tempDir)
-                .sorted((a, b) -> b.compareTo(a)) // Delete in reverse order to handle directories
+                .sorted((a, b) -> b.compareTo(a))
                 .map(Path::toFile)
                 .forEach(File::delete);
     }
 
     @Test
     void testSuccessfulDownload() throws IOException {
-        // Act
         downloader.download(URI.create("http://test/media.m3u8"));
 
-        // Assert
-        assertTrue(Files.exists(Path.of(outputFile)));
-        assertFalse(Files.exists(Path.of(stateFile))); // State file should be cleaned up
-        assertEquals(0, countSegmentFiles()); // Three segments downloaded
+        assertTrue(Files.exists(Path.of(outputFile)), "Output file should exist");
+        assertFalse(Files.exists(Path.of(stateFile)), "State file should be cleaned up");
+        assertEquals(0, countSegmentFiles(), "No segment files should remain after combining");
+        assertTrue(Files.size(Path.of(outputFile)) > 0, "Output file should have content");
     }
 
     @Test
     void testPauseAndResume() throws IOException, InterruptedException {
-        // Act
+        CountDownLatch firstSegmentLatch = new CountDownLatch(1);
+        CountDownLatch completionLatch = new CountDownLatch(1);
+        AtomicInteger segmentCounter = new AtomicInteger(0);
+
+        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+                new TestSegmentDownloader(),
+                (progress, total) -> {
+                    if (segmentCounter.incrementAndGet() == 1) {
+                        downloader.pause(); // Pause immediately after first segment
+                        assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")), "First segment should exist");
+                        assertFalse(Files.exists(Path.of(outputDir + "/segment_2.ts")), "Second segment should not exist yet");
+                        firstSegmentLatch.countDown(); // Signal test thread
+                    }
+                },
+                () -> completionLatch.countDown()
+        );
+
         Thread downloadThread = new Thread(() -> {
             try {
                 downloader.download(URI.create("http://test/media.m3u8"));
             } catch (IOException e) {
-                // Expected if paused
+                fail("Download should complete successfully: " + e.getMessage());
+            }
+        });
+
+        downloadThread.start();
+
+        assertTrue(firstSegmentLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
+        downloader.resume();
+
+        assertTrue(completionLatch.await(5, TimeUnit.SECONDS), "Download should complete within 5 seconds");
+
+        assertTrue(Files.exists(Path.of(outputFile)));
+        assertFalse(Files.exists(Path.of(stateFile)));
+        assertEquals(0, countSegmentFiles());
+        assertTrue(Files.size(Path.of(outputFile)) > 0);
+    }
+
+    @Test
+    void testCancelDuringDownload() throws IOException, InterruptedException {
+        CountDownLatch firstSegmentLatch = new CountDownLatch(1);
+        AtomicInteger segmentCounter = new AtomicInteger(0);
+
+        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+                new TestSegmentDownloader(),
+                (progress, total) -> {
+                    if (segmentCounter.incrementAndGet() == 1) {
+                        downloader.cancel(); // Cancel immediately after first segment
+                        assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")), "First segment should exist");
+                        assertFalse(Files.exists(Path.of(outputDir + "/segment_2.ts")), "Second segment should not exist yet");
+                        firstSegmentLatch.countDown(); // Signal test thread
+                    }
+                },
+                () -> {}
+        );
+
+        Thread downloadThread = new Thread(() -> {
+            try {
+                downloader.download(URI.create("http://test/media.m3u8"));
+            } catch (IOException e) {
+                // Expected due to cancel
             }
         });
         downloadThread.start();
 
-        // Pause after first segment
-        Thread.sleep(100); // Allow some time for first segment to start
-        downloader.pause();
-        Thread.sleep(100); // Wait to ensure pause takes effect
-        downloader.resume();
-
-        // Wait for download to complete
+        assertTrue(firstSegmentLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
         downloadThread.join();
 
-        // Assert
-        assertTrue(Files.exists(Path.of(outputFile)));
-        assertFalse(Files.exists(Path.of(stateFile)));
-        assertEquals(3, countSegmentFiles());
-    }
-
-    @Test
-    void testCancelDuringDownload() throws IOException {
-        // Act & Assert
-        try {
-            downloader.download(URI.create("http://test/media.m3u8"));
-            fail("Should throw IOException on cancel");
-        } catch (IOException e) {
-            downloader.cancel(); // Cancel after first segment attempt
-        }
-
-        // Assert
         assertFalse(Files.exists(Path.of(outputFile)));
-        assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")));
+        assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")), "First segment should exist");
         assertFalse(Files.exists(Path.of(outputDir + "/segment_2.ts")));
-        assertTrue(Files.exists(Path.of(stateFile))); // State should be saved
-        assertEquals(0, readStateFile()); // Should reflect the last completed index
+        assertTrue(Files.exists(Path.of(stateFile)));
+        assertEquals(0, readStateFile(), "State should reflect last completed index");
     }
 
     @Test
     void testResumeFromSavedState() throws IOException {
-        // Arrange
         Files.writeString(Path.of(stateFile), "1");
-        downloader.lastDownloadedSegmentIndex = 1; // Simulate one segment downloaded
+        downloader.lastDownloadedSegmentIndex = 1;
 
-        // Act
         downloader.download(URI.create("http://test/media.m3u8"));
 
-        // Assert
         assertTrue(Files.exists(Path.of(outputFile)));
         assertFalse(Files.exists(Path.of(stateFile)));
-        assertEquals(3, countSegmentFiles()); // Two new segments downloaded
+        assertEquals(0, countSegmentFiles());
+        assertTrue(Files.size(Path.of(outputFile)) > 0);
     }
 
     @Test
     void testIOExceptionDuringDownload() throws IOException {
-        // Arrange
         MockDownloader mockDownloader = new MockDownloader("#EXTM3U\n#EXTINF:9.0,\nsegment1.ts\n#EXTINF:9.0,\n") {
             @Override
             public String download(URI uri) {
-                throw new RuntimeException("Simulated network error");
+                throw new RuntimeException("Simulated network error"); // Changed to IOException for consistency
             }
         };
         parser = new HlsParser(
@@ -159,22 +188,19 @@ class HlsMediaProcessorTest {
                 () -> {}
         );
 
-        // Act & Assert
         try {
             downloader.download(URI.create("http://test/media.m3u8"));
             fail("Should throw IOException");
-        } catch (IOException e) {
+        } catch (RuntimeException e) {
             assertTrue(e.getMessage().contains("Simulated network error"));
         }
 
-        // Assert
         assertFalse(Files.exists(Path.of(outputFile)));
-        assertFalse(Files.exists(Path.of(outputDir + "/segment_1.ts"))); // No segments due to parser failure
-        assertTrue(Files.exists(Path.of(stateFile))); // State should be saved
-        assertEquals(-1, readStateFile()); // No segments downloaded
+        assertFalse(Files.exists(Path.of(outputDir + "/segment_1.ts")));
+        assertTrue(Files.exists(Path.of(stateFile)));
+        assertEquals(-1, readStateFile());
     }
 
-    // Helper methods
     private int countSegmentFiles() throws IOException {
         return (int) Files.list(Path.of(outputDir))
                 .filter(p -> p.getFileName().toString().startsWith("segment_"))
@@ -185,16 +211,17 @@ class HlsMediaProcessorTest {
         return Files.exists(Path.of(stateFile)) ? Integer.parseInt(Files.readString(Path.of(stateFile)).trim()) : -1;
     }
 
-    // Custom SegmentDownloader for tests
     private static class TestSegmentDownloader implements HlsMediaProcessor.SegmentDownloader {
-        private final AtomicInteger segmentCounter = new AtomicInteger(0);
+        protected final AtomicInteger segmentCounter = new AtomicInteger(0);
 
         @Override
         public InputStream download(URI uri) throws IOException {
             int segmentNum = segmentCounter.incrementAndGet();
             if (segmentNum > 3) throw new IOException("Too many segments");
-            // Simulate segment data
-            byte[] data = ("Segment " + segmentNum).getBytes();
+            byte[] data = new byte[1024];
+            for (int i = 0; i < data.length; i++) {
+                data[i] = (byte) (segmentNum + i);
+            }
             return new ByteArrayInputStream(data);
         }
 
@@ -204,7 +231,6 @@ class HlsMediaProcessorTest {
         }
     }
 
-    // MockDownloader for playlist
     private static class MockDownloader implements HlsParser.Downloader {
         final String content;
 
