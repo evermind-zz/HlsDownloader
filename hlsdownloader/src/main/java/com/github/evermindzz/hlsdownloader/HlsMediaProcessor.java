@@ -36,7 +36,7 @@ public class HlsMediaProcessor {
      * @param parser                    The HlsParser instance to parse playlists.
      * @param outputDir                 Directory to store temporary segments.
      * @param outputFile                Final output file path for the combined segments.
-     * @param segmentDownloader         Use this downloader to download segments.
+     * @param segmentDownloader         Use this downloader to download and decrypt segments.
      * @param stateManager              Handles loading, saving, and cleaning up state.
      * @param segmentCombiner           Handles combining segments.
      * @param progressCallback          Callback for download progress updates.
@@ -107,7 +107,14 @@ public class HlsMediaProcessor {
 
             Segment segment = playlist.getSegments().get(i);
             String segmentFileName = outputDir + "/segment_" + (i + 1) + ".ts";
-            downloadSegment(segment.getUri(), segmentFileName);
+            try (InputStream in = segmentDownloader.download(segment.getUri(), segment);
+                 FileOutputStream out = new FileOutputStream(segmentFileName)) {
+                byte[] buffer = new byte[1024];
+                int bytesRead;
+                while ((bytesRead = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, bytesRead);
+                }
+            }
 
             // Update progress
             lastDownloadedSegmentIndex = i;
@@ -135,50 +142,6 @@ public class HlsMediaProcessor {
 
         // Trigger after post-processing callback
         afterPostProcessingCallback.onAfterPostProcessingComplete();
-    }
-
-    private class DefaultDownloader implements SegmentDownloader {
-        HttpURLConnection connection;
-        @Override
-        public InputStream download(URI uri) throws IOException {
-            disconnect();
-            connection = (HttpURLConnection) uri.toURL().openConnection();
-            connection.setRequestMethod("GET");
-            connection.setConnectTimeout(10000);
-            connection.setReadTimeout(10000);
-            return connection.getInputStream();
-        }
-
-        @Override
-        public void disconnect() {
-            if (connection != null) {
-                connection.disconnect();
-                connection = null;
-            }
-        }
-    }
-
-    /**
-     * Downloads a single segment.
-     *
-     * @param segmentUri URI of the segment.
-     * @param fileName   File path to save the segment.
-     * @throws IOException If downloading fails.
-     */
-    void downloadSegment(URI segmentUri, String fileName) throws IOException {
-        try (InputStream in = segmentDownloader.download(segmentUri);
-             FileOutputStream out = new FileOutputStream(fileName)) {
-            byte[] buffer = new byte[1024];
-            int bytesRead;
-            while ((bytesRead = in.read(buffer)) != -1) {
-                if (isPaused.get() || isCancelled.get()) {
-                    throw new IOException(isPaused.get() ? "Download paused." : "Download cancelled.");
-                }
-                out.write(buffer, 0, bytesRead);
-            }
-        } finally {
-            segmentDownloader.disconnect();
-        }
     }
 
     /**
@@ -310,8 +273,45 @@ public class HlsMediaProcessor {
      * Download interface to implement custom downloader.
      */
     public interface SegmentDownloader {
-        InputStream download(URI uri) throws IOException;
+        /**
+         * Downloads and optionally decrypts a segment based on its URI and metadata.
+         *
+         * @param uri The URI of the segment to download.
+         * @param segment The segment metadata, including encryption info if applicable.
+         * @return An InputStream containing the downloaded (and decrypted, if encrypted) data.
+         * @throws IOException If downloading or decryption fails.
+         */
+        InputStream download(URI uri, HlsParser.Segment segment) throws IOException;
+
+        /**
+         * Disconnects any active connections.
+         */
         void disconnect();
+    }
+
+    /**
+     * Default implementation of SegmentDownloader using basic HTTP downloading.
+     */
+    private class DefaultDownloader implements SegmentDownloader {
+        HttpURLConnection connection;
+
+        @Override
+        public InputStream download(URI uri, HlsParser.Segment segment) throws IOException {
+            disconnect();
+            connection = (HttpURLConnection) uri.toURL().openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(10000);
+            connection.setReadTimeout(10000);
+            return connection.getInputStream();
+        }
+
+        @Override
+        public void disconnect() {
+            if (connection != null) {
+                connection.disconnect();
+                connection = null;
+            }
+        }
     }
 
     /**
