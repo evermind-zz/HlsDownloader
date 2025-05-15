@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
@@ -167,8 +168,21 @@ class HlsMediaProcessorTest {
 
     @Test
     void testResumeFromSavedState() throws IOException {
+        // Setup: Simulate a partially completed download with lastDownloadedSegmentIndex = 1
         Files.writeString(Path.of(stateFile), "1");
         downloader.lastDownloadedSegmentIndex = 1;
+
+        // Create segment_1.ts and segment_2.ts (for indices 0 and 1) to simulate existing segments
+        for (int i = 1; i <= 2; i++) {
+            String segmentFile = outputDir + "/segment_" + i + ".ts";
+            byte[] data = new byte[1024];
+            for (int j = 0; j < data.length; j++) {
+                data[j] = (byte) (i + j); // Same logic as TestSegmentDownloader
+            }
+            try (FileOutputStream fos = new FileOutputStream(segmentFile)) {
+                fos.write(data);
+            }
+        }
 
         downloader.download(URI.create("http://test/media.m3u8"));
 
