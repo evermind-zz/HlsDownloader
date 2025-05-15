@@ -34,14 +34,15 @@ class HlsMediaProcessorTest {
         outputFile = tempDir.resolve("output.ts").toString();
         stateFile = tempDir.resolve("download_state.txt").toString();
 
+        // Playlist with encrypted segments and a key change
         String playlistContent = "#EXTM3U\n" +
                 "#EXT-X-TARGETDURATION:10\n" +
-                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0xabcdef\n" +
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key1.key\",IV=0xabcdef\n" +
                 "#EXTINF:9.0,\n" +
                 "segment1.ts\n" +
                 "#EXTINF:9.0,\n" +
                 "segment2.ts\n" +
-                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0x123456\n" +
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key2.key\",IV=0x123456\n" +
                 "#EXTINF:9.0,\n" +
                 "segment3.ts\n" +
                 "#EXT-X-ENDLIST";
@@ -56,7 +57,7 @@ class HlsMediaProcessorTest {
         );
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new TestSegmentDownloader(),
+                new DecryptingSegmentDownloader(),
                 null, // Use default StateManager
                 null, // Use default SegmentCombiner
                 (progress, total) -> {},
@@ -90,7 +91,7 @@ class HlsMediaProcessorTest {
         AtomicInteger segmentCounter = new AtomicInteger(0);
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new TestSegmentDownloader(),
+                new DecryptingSegmentDownloader(),
                 null, // Use default StateManager
                 null, // Use default SegmentCombiner
                 (progress, total) -> {
@@ -132,7 +133,7 @@ class HlsMediaProcessorTest {
         AtomicInteger segmentCounter = new AtomicInteger(0);
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new TestSegmentDownloader(),
+                new DecryptingSegmentDownloader(),
                 null, // Use default StateManager
                 null, // Use default SegmentCombiner
                 (progress, total) -> {
@@ -206,7 +207,7 @@ class HlsMediaProcessorTest {
                 true
         );
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new TestSegmentDownloader(),
+                new DecryptingSegmentDownloader(),
                 null, // Use default StateManager
                 null, // Use default SegmentCombiner
                 (progress, total) -> {},
@@ -227,6 +228,86 @@ class HlsMediaProcessorTest {
         assertEquals(-1, readStateFile());
     }
 
+    @Test
+    void testDecryptSingleEncryptedSegment() throws IOException {
+        // Prepare mock encrypted segment and key
+        String segmentFile = outputDir + "/segment_1.ts";
+        byte[] originalData = new byte[1024];
+        for (int i = 0; i < originalData.length; i++) {
+            originalData[i] = (byte) i; // Original unencrypted data
+        }
+        byte[] encryptedData = encryptMock(originalData); // Mock encryption (reverse bytes)
+        try (FileOutputStream fos = new FileOutputStream(segmentFile)) {
+            fos.write(encryptedData);
+        }
+
+        // Mock key downloader
+        MockKeyDownloader keyDownloader = new MockKeyDownloader("key1".getBytes());
+        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+                new DecryptingSegmentDownloader(keyDownloader),
+                null,
+                null,
+                (progress, total) -> {},
+                () -> {},
+                () -> {}
+        );
+
+        downloader.download(URI.create("http://test/media.m3u8"));
+
+        assertTrue(Files.exists(Path.of(outputFile)));
+        assertFalse(Files.exists(Path.of(stateFile)));
+        assertEquals(0, countSegmentFiles());
+        try (InputStream is = new FileInputStream(outputFile)) {
+            byte[] decryptedData = is.readAllBytes();
+            assertArrayEquals(originalData, decryptedData, "Decrypted data should match original data");
+        }
+    }
+
+    @Test
+    void testDecryptWithKeyChange() throws IOException {
+        // Prepare mock encrypted segments and keys
+        for (int i = 1; i <= 3; i++) {
+            String segmentFile = outputDir + "/segment_" + i + ".ts";
+            byte[] originalData = new byte[1024];
+            for (int j = 0; j < originalData.length; j++) {
+                originalData[j] = (byte) (i + j); // Unique data per segment
+            }
+            byte[] encryptedData = encryptMock(originalData); // Mock encryption
+            try (FileOutputStream fos = new FileOutputStream(segmentFile)) {
+                fos.write(encryptedData);
+            }
+        }
+
+        // Mock key downloader with different keys
+        MockKeyDownloader keyDownloader = new MockKeyDownloader(
+                new byte[][] {"key1".getBytes(), "key1".getBytes(), "key2".getBytes()} // Key change at segment 3
+        );
+        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+                new DecryptingSegmentDownloader(keyDownloader),
+                null,
+                null,
+                (progress, total) -> {},
+                () -> {},
+                () -> {}
+        );
+
+        downloader.download(URI.create("http://test/media.m3u8"));
+
+        assertTrue(Files.exists(Path.of(outputFile)));
+        assertFalse(Files.exists(Path.of(stateFile)));
+        assertEquals(0, countSegmentFiles());
+        try (InputStream is = new FileInputStream(outputFile)) {
+            byte[] combinedData = is.readAllBytes();
+            byte[] expectedData = new byte[1024 * 3];
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 1024; j++) {
+                    expectedData[i * 1024 + j] = (byte) (i + 1 + j);
+                }
+            }
+            assertArrayEquals(expectedData, combinedData, "Decrypted data should match original data across key change");
+        }
+    }
+
     private int countSegmentFiles() throws IOException {
         return (int) Files.list(Path.of(outputDir))
                 .filter(p -> p.getFileName().toString().startsWith("segment_"))
@@ -235,6 +316,15 @@ class HlsMediaProcessorTest {
 
     private int readStateFile() throws IOException {
         return Files.exists(Path.of(stateFile)) ? Integer.parseInt(Files.readString(Path.of(stateFile)).trim()) : -1;
+    }
+
+    private byte[] encryptMock(byte[] data) {
+        // Mock encryption: reverse bytes (placeholder for real AES-128)
+        byte[] encrypted = new byte[data.length];
+        for (int i = 0; i < data.length; i++) {
+            encrypted[i] = (byte) (255 - data[i]); // Simple reversible transformation
+        }
+        return encrypted;
     }
 
     private static class TestSegmentDownloader implements HlsMediaProcessor.SegmentDownloader {
@@ -254,6 +344,65 @@ class HlsMediaProcessorTest {
         @Override
         public void disconnect() {
             // No-op for test
+        }
+    }
+
+    private static class DecryptingSegmentDownloader implements HlsMediaProcessor.SegmentDownloader {
+        private final MockKeyDownloader keyDownloader;
+        private int segmentIndex = 0;
+
+        DecryptingSegmentDownloader() {
+            this(new MockKeyDownloader(null));
+        }
+
+        DecryptingSegmentDownloader(MockKeyDownloader keyDownloader) {
+            this.keyDownloader = keyDownloader != null ? keyDownloader : new MockKeyDownloader(null);
+        }
+
+        @Override
+        public InputStream download(URI uri) throws IOException {
+            segmentIndex++;
+            // Simulate fetching encryption info from HlsParser (mocked here)
+            HlsParser.MediaPlaylist playlist = parser.parse(URI.create("http://test/media.m3u8"));
+            HlsParser.EncryptionInfo encryptionInfo = playlist.getSegments().get(segmentIndex - 1).getEncryptionInfo();
+            byte[] key = keyDownloader.download(encryptionInfo.getUri());
+
+            // Read the encrypted segment file
+            String segmentFile = outputDir + "/segment_" + segmentIndex + ".ts";
+            byte[] encryptedData = Files.readAllBytes(Paths.get(segmentFile));
+
+            // Mock decryption (reverse the mock encryption)
+            byte[] decryptedData = new byte[encryptedData.length];
+            for (int i = 0; i < encryptedData.length; i++) {
+                decryptedData[i] = (byte) (255 - encryptedData[i]); // Reverse the mock encryption
+            }
+
+            return new ByteArrayInputStream(decryptedData);
+        }
+
+        @Override
+        public void disconnect() {
+            // No-op for test
+        }
+    }
+
+    private static class MockKeyDownloader {
+        private final byte[][] keys;
+
+        MockKeyDownloader(byte[] key) {
+            this.keys = key != null ? new byte[][] {key} : null;
+        }
+
+        MockKeyDownloader(byte[][] keys) {
+            this.keys = keys;
+        }
+
+        public byte[] download(URI uri) throws IOException {
+            if (keys == null) {
+                return "defaultkey".getBytes(); // Default key if none provided
+            }
+            int index = Integer.parseInt(uri.getHost().replace("example.com/key", "")) - 1;
+            return keys[Math.min(index, keys.length - 1)];
         }
     }
 
