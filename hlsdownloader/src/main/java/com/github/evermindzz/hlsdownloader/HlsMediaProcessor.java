@@ -34,7 +34,7 @@ public class HlsMediaProcessor {
      * @param parser                The HlsParser instance to parse playlists.
      * @param outputDir             Directory to store temporary segments.
      * @param outputFile            Final output file path for the combined segments.
-     * @param segmentDownloader     use this downloader to download segments
+     * @param segmentDownloader     Use this downloader to download segments
      * @param progressCallback      Callback for download progress updates (for NewPipe integration).
      * @param postProcessingCallback Callback for post-processing (e.g., format conversion in NewPipe).
      */
@@ -65,6 +65,7 @@ public class HlsMediaProcessor {
     public void download(URI uri) throws IOException {
         // Load previous state if resuming
         loadState();
+        saveState(); // Save initial state immediately after loading
 
         // Parse the playlist if not already parsed
         if (playlist == null) {
@@ -144,7 +145,6 @@ public class HlsMediaProcessor {
      * @throws IOException If downloading fails.
      */
     void downloadSegment(URI segmentUri, String fileName) throws IOException {
-
         try (InputStream in = segmentDownloader.download(segmentUri);
              FileOutputStream out = new FileOutputStream(fileName)) {
             byte[] buffer = new byte[1024];
