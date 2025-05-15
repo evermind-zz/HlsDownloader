@@ -19,11 +19,13 @@ public class HlsMediaProcessor {
     private final HlsParser parser;
     private final String outputDir;
     private final String outputFile;
-    private final String stateFile; // File to store download state
+    private final StateManager stateManager;
     private final DownloadProgressCallback progressCallback;
     private final PostProcessingCallback postProcessingCallback;
-    protected final AtomicBoolean isPaused;
-    protected final AtomicBoolean isCancelled;
+    private final AfterPostProcessingCallback afterPostProcessingCallback;
+    private final SegmentCombiner segmentCombiner;
+    private final AtomicBoolean isPaused;
+    private final AtomicBoolean isCancelled;
     private final SegmentDownloader segmentDownloader;
     private MediaPlaylist playlist; // Store playlist for resuming
     int lastDownloadedSegmentIndex; // Track progress
@@ -31,26 +33,35 @@ public class HlsMediaProcessor {
     /**
      * Constructs a new HlsMediaProcessor.
      *
-     * @param parser                The HlsParser instance to parse playlists.
-     * @param outputDir             Directory to store temporary segments.
-     * @param outputFile            Final output file path for the combined segments.
-     * @param segmentDownloader     Use this downloader to download segments
-     * @param progressCallback      Callback for download progress updates (for NewPipe integration).
-     * @param postProcessingCallback Callback for post-processing (e.g., format conversion in NewPipe).
+     * @param parser                    The HlsParser instance to parse playlists.
+     * @param outputDir                 Directory to store temporary segments.
+     * @param outputFile                Final output file path for the combined segments.
+     * @param segmentDownloader         Use this downloader to download segments.
+     * @param stateManager              Handles loading, saving, and cleaning up state.
+     * @param segmentCombiner           Handles combining segments.
+     * @param progressCallback          Callback for download progress updates.
+     * @param postProcessingCallback    Callback for post-processing (e.g., format conversion in NewPipe).
+     * @param afterPostProcessingCallback Callback for actions after post-processing.
      */
     public HlsMediaProcessor(HlsParser parser,
                          String outputDir,
                          String outputFile,
                          SegmentDownloader segmentDownloader,
+                         StateManager stateManager,
+                         SegmentCombiner segmentCombiner,
                          DownloadProgressCallback progressCallback,
-                         PostProcessingCallback postProcessingCallback) {
+                         PostProcessingCallback postProcessingCallback,
+                         AfterPostProcessingCallback afterPostProcessingCallback) {
         this.parser = parser;
         this.outputDir = outputDir;
         this.outputFile = outputFile;
-        this.stateFile = outputDir + "/download_state.txt"; // Store state in outputDir
+        String stateFile = outputDir + "/download_state.txt";
         this.segmentDownloader = segmentDownloader != null ? segmentDownloader : new DefaultDownloader();
+        this.stateManager = stateManager != null ? stateManager : new DefaultStateManager(stateFile);
+        this.segmentCombiner = segmentCombiner != null ? segmentCombiner : new DefaultSegmentCombiner();
         this.progressCallback = progressCallback != null ? progressCallback : (progress, total) -> {};
         this.postProcessingCallback = postProcessingCallback != null ? postProcessingCallback : () -> {};
+        this.afterPostProcessingCallback = afterPostProcessingCallback != null ? afterPostProcessingCallback : () -> {};
         this.isPaused = new AtomicBoolean(false);
         this.isCancelled = new AtomicBoolean(false);
         this.lastDownloadedSegmentIndex = -1;
@@ -64,8 +75,8 @@ public class HlsMediaProcessor {
      */
     public void download(URI uri) throws IOException {
         // Load previous state if resuming
-        loadState();
-        saveState(); // Save initial state immediately after loading
+        lastDownloadedSegmentIndex = stateManager.loadState();
+        stateManager.saveState(lastDownloadedSegmentIndex); // Save initial state
 
         // Parse the playlist if not already parsed
         if (playlist == null) {
@@ -100,19 +111,22 @@ public class HlsMediaProcessor {
 
             // Update progress
             lastDownloadedSegmentIndex = i;
-            saveState(); // Save progress after each segment
+            stateManager.saveState(lastDownloadedSegmentIndex); // Save progress after each segment
             int progressPercent = (int) (((i + 1) / (double) segmentCount) * 100);
             progressCallback.onProgressUpdate(progressPercent, segmentCount);
         }
 
-        // Combine segments
-        combineSegments(segmentCount);
-
-        // Clean up state file
-        Files.deleteIfExists(Paths.get(stateFile));
+        // Combine segments using the SegmentCombiner
+        segmentCombiner.combineSegments(outputDir, outputFile, segmentCount);
 
         // Trigger post-processing
         postProcessingCallback.onPostProcessingComplete();
+
+        // Clean up state file after post-processing
+        stateManager.cleanupState();
+
+        // Trigger after post-processing callback
+        afterPostProcessingCallback.onAfterPostProcessingComplete();
     }
 
     private class DefaultDownloader implements SegmentDownloader {
@@ -120,17 +134,16 @@ public class HlsMediaProcessor {
         @Override
         public InputStream download(URI uri) throws IOException {
             disconnect();
-            connection =  (HttpURLConnection) uri.toURL().openConnection();
+            connection = (HttpURLConnection) uri.toURL().openConnection();
             connection.setRequestMethod("GET");
             connection.setConnectTimeout(10000);
             connection.setReadTimeout(10000);
-
             return connection.getInputStream();
         }
 
         @Override
         public void disconnect() {
-            if (connection != null) { // clear possible old connection
+            if (connection != null) {
                 connection.disconnect();
                 connection = null;
             }
@@ -161,30 +174,6 @@ public class HlsMediaProcessor {
     }
 
     /**
-     * Combines downloaded segments into a single file.
-     *
-     * @param segmentCount Number of segments to combine.
-     * @throws IOException If file operations fail.
-     */
-    void combineSegments(int segmentCount) throws IOException {
-        try (FileOutputStream fos = new FileOutputStream(outputFile, true)) {
-            for (int i = 1; i <= segmentCount; i++) {
-                String segmentFile = outputDir + "/segment_" + i + ".ts";
-                try (FileInputStream fis = new FileInputStream(segmentFile)) {
-                    byte[] buffer = new byte[1024];
-                    int bytesRead;
-                    while ((bytesRead = fis.read(buffer)) != -1) {
-                        fos.write(buffer, 0, bytesRead);
-                    }
-                }
-                // Delete the segment file after combining
-                Files.delete(Paths.get(segmentFile));
-            }
-        }
-        System.out.println("Combined segments into: " + outputFile);
-    }
-
-    /**
      * Pauses the ongoing download.
      */
     public void pause() {
@@ -206,39 +195,116 @@ public class HlsMediaProcessor {
     }
 
     /**
-     * Saves the current download state to a file.
+     * Interface for managing download state, including loading, saving, and cleaning up state.
      */
-    protected void saveState() throws IOException {
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(stateFile))) {
-            writer.write(String.valueOf(lastDownloadedSegmentIndex));
-        }
+    public interface StateManager {
+        /**
+         * Loads the last downloaded segment index from persistent storage.
+         *
+         * @return The last downloaded segment index, or -1 if no state exists.
+         * @throws IOException If an error occurs while reading the state.
+         */
+        int loadState() throws IOException;
+
+        /**
+         * Saves the current downloaded segment index to persistent storage.
+         *
+         * @param index The last downloaded segment index to save.
+         * @throws IOException If an error occurs while writing the state.
+         */
+        void saveState(int index) throws IOException;
+
+        /**
+         * Cleans up the state file or storage after the download is complete.
+         *
+         * @throws IOException If an error occurs while cleaning up the state.
+         */
+        void cleanupState() throws IOException;
     }
 
     /**
-     * Loads the download state from a file.
+     * Default implementation of StateManager using file-based persistence.
      */
-    private void loadState() throws IOException {
-        File file = new File(stateFile);
-        if (file.exists()) {
-            try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-                String line = reader.readLine();
-                if (line != null) {
-                    lastDownloadedSegmentIndex = Integer.parseInt(line.trim());
+    private static class DefaultStateManager implements StateManager {
+        private final String stateFile;
+
+        DefaultStateManager(String stateFile) {
+            this.stateFile = stateFile;
+        }
+
+        @Override
+        public int loadState() throws IOException {
+            File file = new File(stateFile);
+            if (file.exists()) {
+                try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+                    String line = reader.readLine();
+                    if (line != null) {
+                        return Integer.parseInt(line.trim());
+                    }
                 }
             }
+            return -1; // Default value if no state exists
+        }
+
+        @Override
+        public void saveState(int index) throws IOException {
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(stateFile))) {
+                writer.write(String.valueOf(index));
+            }
+        }
+
+        @Override
+        public void cleanupState() throws IOException {
+            Files.deleteIfExists(Paths.get(stateFile));
         }
     }
 
     /**
-     * Download interface to implement custom downloader
+     * Interface for combining segments into a single output file.
+     */
+    public interface SegmentCombiner {
+        /**
+         * Combines the downloaded segments into a single output file.
+         *
+         * @param outputDir    The directory containing the segment files.
+         * @param outputFile   The path to the final combined file.
+         * @param segmentCount The number of segments to combine.
+         * @throws IOException If an error occurs during the combination process.
+         */
+        void combineSegments(String outputDir, String outputFile, int segmentCount) throws IOException;
+    }
+
+    /**
+     * Default implementation of SegmentCombiner.
+     */
+    private static class DefaultSegmentCombiner implements SegmentCombiner {
+        @Override
+        public void combineSegments(String outputDir, String outputFile, int segmentCount) throws IOException {
+            try (FileOutputStream fos = new FileOutputStream(outputFile, true)) {
+                for (int i = 1; i <= segmentCount; i++) {
+                    String segmentFile = outputDir + "/segment_" + i + ".ts";
+                    try (FileInputStream fis = new FileInputStream(segmentFile)) {
+                        byte[] buffer = new byte[1024];
+                        int bytesRead;
+                        while ((bytesRead = fis.read(buffer)) != -1) {
+                            fos.write(buffer, 0, bytesRead);
+                        }
+                    }
+                    // Delete the segment file after combining
+                    Files.delete(Paths.get(segmentFile));
+                }
+            }
+            System.out.println("Combined segments into: " + outputFile);
+        }
+    }
+
+    /**
+     * Download interface to implement custom downloader.
      */
     public interface SegmentDownloader {
         InputStream download(URI uri) throws IOException;
-
         void disconnect();
     }
-
-    // ===== Integration Hooks for NewPipe =====
 
     /**
      * Callback interface for download progress updates, compatible with NewPipe's download system.
@@ -252,5 +318,16 @@ public class HlsMediaProcessor {
      */
     public interface PostProcessingCallback {
         void onPostProcessingComplete();
+    }
+
+    /**
+     * Callback interface for actions after post-processing is complete.
+     */
+    public interface AfterPostProcessingCallback {
+        /**
+         * Called after post-processing and segment combination are complete.
+         * This can be used for additional cleanup or notifications.
+         */
+        void onAfterPostProcessingComplete();
     }
 }
