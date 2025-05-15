@@ -24,6 +24,7 @@ public class HlsMediaProcessor {
     private final PostProcessingCallback postProcessingCallback;
     protected final AtomicBoolean isPaused;
     protected final AtomicBoolean isCancelled;
+    private final SegmentDownloader segmentDownloader;
     private MediaPlaylist playlist; // Store playlist for resuming
     int lastDownloadedSegmentIndex; // Track progress
 
@@ -33,15 +34,21 @@ public class HlsMediaProcessor {
      * @param parser                The HlsParser instance to parse playlists.
      * @param outputDir             Directory to store temporary segments.
      * @param outputFile            Final output file path for the combined segments.
+     * @param segmentDownloader     use this downloader to download segments
      * @param progressCallback      Callback for download progress updates (for NewPipe integration).
      * @param postProcessingCallback Callback for post-processing (e.g., format conversion in NewPipe).
      */
-    public HlsMediaProcessor(HlsParser parser, String outputDir, String outputFile,
-                         DownloadProgressCallback progressCallback, PostProcessingCallback postProcessingCallback) {
+    public HlsMediaProcessor(HlsParser parser,
+                         String outputDir,
+                         String outputFile,
+                         SegmentDownloader segmentDownloader,
+                         DownloadProgressCallback progressCallback,
+                         PostProcessingCallback postProcessingCallback) {
         this.parser = parser;
         this.outputDir = outputDir;
         this.outputFile = outputFile;
         this.stateFile = outputDir + "/download_state.txt"; // Store state in outputDir
+        this.segmentDownloader = segmentDownloader != null ? segmentDownloader : new DefaultDownloader();
         this.progressCallback = progressCallback != null ? progressCallback : (progress, total) -> {};
         this.postProcessingCallback = postProcessingCallback != null ? postProcessingCallback : () -> {};
         this.isPaused = new AtomicBoolean(false);
@@ -107,6 +114,28 @@ public class HlsMediaProcessor {
         postProcessingCallback.onPostProcessingComplete();
     }
 
+    private class DefaultDownloader implements SegmentDownloader {
+        HttpURLConnection connection;
+        @Override
+        public InputStream download(URI uri) throws IOException {
+            disconnect();
+            connection =  (HttpURLConnection) uri.toURL().openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(10000);
+            connection.setReadTimeout(10000);
+
+            return connection.getInputStream();
+        }
+
+        @Override
+        public void disconnect() {
+            if (connection != null) { // clear possible old connection
+                connection.disconnect();
+                connection = null;
+            }
+        }
+    }
+
     /**
      * Downloads a single segment.
      *
@@ -115,12 +144,8 @@ public class HlsMediaProcessor {
      * @throws IOException If downloading fails.
      */
     void downloadSegment(URI segmentUri, String fileName) throws IOException {
-        HttpURLConnection connection = (HttpURLConnection) segmentUri.toURL().openConnection();
-        connection.setRequestMethod("GET");
-        connection.setConnectTimeout(10000);
-        connection.setReadTimeout(10000);
 
-        try (InputStream in = connection.getInputStream();
+        try (InputStream in = segmentDownloader.download(segmentUri);
              FileOutputStream out = new FileOutputStream(fileName)) {
             byte[] buffer = new byte[1024];
             int bytesRead;
@@ -131,7 +156,7 @@ public class HlsMediaProcessor {
                 out.write(buffer, 0, bytesRead);
             }
         } finally {
-            connection.disconnect();
+            segmentDownloader.disconnect();
         }
     }
 
@@ -202,6 +227,15 @@ public class HlsMediaProcessor {
                 }
             }
         }
+    }
+
+    /**
+     * Download interface to implement custom downloader
+     */
+    public interface SegmentDownloader {
+        InputStream download(URI uri) throws IOException;
+
+        void disconnect();
     }
 
     // ===== Integration Hooks for NewPipe =====
