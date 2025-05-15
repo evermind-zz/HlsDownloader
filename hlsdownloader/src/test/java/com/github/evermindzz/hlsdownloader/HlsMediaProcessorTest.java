@@ -48,7 +48,6 @@ class HlsMediaProcessorTest {
             "#EXTINF:9.0,\n" +
             "segment2.ts\n" +
             "#EXT-X-ENDLIST";
-
     private static final String SINGLE_SEGMENT_PLAYLIST = "#EXTM3U\n" +
             "#EXT-X-TARGETDURATION:10\n" +
             "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key1.key\",IV=0xabcdef\n" +
@@ -76,7 +75,7 @@ class HlsMediaProcessorTest {
     }
 
     private void initHls(String playlistContent) {
-        initHls(playlistContent, new MockDownloader(playlistContent), new DecryptingSegmentDownloader(outputDir));
+        initHls(playlistContent, new MockDownloader(playlistContent), new DecryptingSegmentDownloader(outputDir, new MockKeyDownloader("defaultkey".getBytes())));
     }
 
     private void initHls(String playlistContent, HlsParser.Downloader parserDownloader, HlsMediaProcessor.SegmentDownloader downloaderSegment) {
@@ -294,6 +293,24 @@ class HlsMediaProcessorTest {
             }
             assertArrayEquals(expectedData, combinedData, "Decrypted data should match original data across key change");
         }
+    }
+
+    @Test
+    void testEmptyPlaylist() throws IOException {
+        String emptyPlaylist = "#EXTM3U\n#EXT-X-ENDLIST";
+        initHls(emptyPlaylist);
+
+        try {
+            downloader.download(URI.create("http://test/media.m3u8"));
+            fail("Should throw IOException for empty playlist");
+        } catch (IOException e) {
+            assertTrue(e.getMessage().contains("No segments found in the playlist"));
+        }
+
+        assertFalse(Files.exists(Path.of(outputFile)));
+        assertTrue(Files.exists(Path.of(stateFile)), "State file should exist with initial state");
+        assertEquals(-1, readStateFile(), "State file should contain -1 for no segments downloaded");
+        assertEquals(0, countSegmentFiles());
     }
 
     private int countSegmentFiles() throws IOException {
