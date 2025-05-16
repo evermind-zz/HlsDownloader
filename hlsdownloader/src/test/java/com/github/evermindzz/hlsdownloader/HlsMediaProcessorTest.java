@@ -313,6 +313,29 @@ class HlsMediaProcessorTest {
         assertEquals(0, countSegmentFiles());
     }
 
+    @Test
+    void testInvalidSegmentUri() throws IOException {
+        initHls(TWO_SEGMENT_PLAYLIST, new MockDownloader(TWO_SEGMENT_PLAYLIST),
+                new DecryptingSegmentDownloader(outputDir) {
+                    @Override
+                    public InputStream download(URI uri, HlsParser.Segment segment) throws IOException {
+                        throw new IOException("Invalid segment URI: " + uri);
+                    }
+                });
+
+        try {
+            downloader.download(URI.create("http://test/media.m3u8"));
+            fail("Should throw IOException for invalid segment URI");
+        } catch (IOException e) {
+            assertTrue(e.getMessage().contains("Invalid segment URI"));
+        }
+
+        assertFalse(Files.exists(Path.of(outputFile)));
+        assertTrue(Files.exists(Path.of(stateFile)));
+        assertEquals(-1, readStateFile(), "State should remain at -1 since no segments were downloaded");
+        assertEquals(0, countSegmentFiles());
+    }
+
     private int countSegmentFiles() throws IOException {
         return (int) Files.list(Path.of(outputDir))
                 .filter(p -> p.getFileName().toString().startsWith("segment_"))
