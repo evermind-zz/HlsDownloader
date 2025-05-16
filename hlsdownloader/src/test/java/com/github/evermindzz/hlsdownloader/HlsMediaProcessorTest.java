@@ -127,8 +127,8 @@ class HlsMediaProcessorTest {
                         firstSegmentLatch.countDown(); // Signal test thread
                     }
                 },
-                () -> completionLatch.countDown(),
-                () -> {}
+                () -> {},
+                () -> completionLatch.countDown()
         );
 
         Thread downloadThread = new Thread(() -> {
