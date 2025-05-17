@@ -9,9 +9,11 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 /**
@@ -22,16 +24,24 @@ public class HlsMediaProcessor {
     private final HlsParser parser;
     private final String outputDir;
     private final String outputFile;
-    private final StateManager stateManager;
+    private final SegmentStateManager segmentStateManager;
     private final DownloadProgressCallback progressCallback;
-    private final PostProcessingCallback postProcessingCallback;
-    private final AfterPostProcessingCallback afterPostProcessingCallback;
+    private final DownloadStateCallback stateCallback;
     private final SegmentCombiner segmentCombiner;
     private final AtomicBoolean isCancelled;
+    private final AtomicBoolean isPaused;
     private final HlsParser.Fetcher fetcher;
     private final Decryptor decryptor;
     private final int numThreads;
     private MediaPlaylist playlist; // Store playlist for resuming
+    private ExecutorService executor;
+    private CountDownLatch pauseLatch; // For pausing threads
+    private AtomicReference<DownloadState> lastNotifiedState; // Track last notified state
+
+    // Enum for download states
+    public enum DownloadState {
+        STARTED, PAUSED, RESUMED, CANCELLED, COMPLETED
+    }
 
     /**
      * Constructs a new HlsMediaProcessor.
@@ -42,11 +52,10 @@ public class HlsMediaProcessor {
      * @param fetcher                   Use this fetcher to download segments and keys.
      * @param decryptor                 Use this decryptor to decrypt segments.
      * @param numThreads                Number of threads to use for parallel downloads.
-     * @param stateManager              Handles loading, saving, and cleaning up state.
+     * @param segmentStateManager       Handles loading, saving, and cleaning up segment state.
      * @param segmentCombiner           Handles combining segments.
      * @param progressCallback          Callback for download progress updates.
-     * @param postProcessingCallback    Callback for post-processing (e.g., format conversion in NewPipe).
-     * @param afterPostProcessingCallback Callback for actions after post-processing.
+     * @param stateCallback             Callback for download state changes.
      */
     public HlsMediaProcessor(HlsParser parser,
                          String outputDir,
@@ -54,42 +63,53 @@ public class HlsMediaProcessor {
                          HlsParser.Fetcher fetcher,
                          Decryptor decryptor,
                          int numThreads,
-                         StateManager stateManager,
+                         SegmentStateManager segmentStateManager,
                          SegmentCombiner segmentCombiner,
                          DownloadProgressCallback progressCallback,
-                         PostProcessingCallback postProcessingCallback,
-                         AfterPostProcessingCallback afterPostProcessingCallback) {
+                         DownloadStateCallback stateCallback) {
         this.parser = parser;
         this.outputDir = outputDir;
         this.outputFile = outputFile;
         String stateFile = outputDir + "/download_state.txt";
         this.fetcher = fetcher != null ? fetcher : new DefaultFetcher();
         this.decryptor = decryptor != null ? decryptor : new DefaultDecryptor();
-        this.numThreads = Math.max(1, numThreads); // Ensure at least 1 thread
-        this.stateManager = stateManager != null ? stateManager : new DefaultStateManager(stateFile);
+        this.numThreads = Math.max(1, numThreads);
+        this.segmentStateManager = segmentStateManager != null ? segmentStateManager : new DefaultSegmentStateManager(stateFile);
         this.segmentCombiner = segmentCombiner != null ? segmentCombiner : new DefaultSegmentCombiner();
         this.progressCallback = progressCallback != null ? progressCallback : (progress, total) -> {};
-        this.postProcessingCallback = postProcessingCallback != null ? postProcessingCallback : () -> {};
-        this.afterPostProcessingCallback = afterPostProcessingCallback != null ? afterPostProcessingCallback : () -> {};
+        this.stateCallback = stateCallback != null ? stateCallback : (state, message) -> {};
         this.isCancelled = new AtomicBoolean(false);
+        this.isPaused = new AtomicBoolean(false);
+        this.lastNotifiedState = new AtomicReference<>(DownloadState.STARTED);
     }
 
     /**
      * Downloads the HLS media playlist and its segments, with support for multi-threading.
      *
      * @param uri The URI of the HLS playlist.
-     * @throws IOException If downloading or parsing fails.
      */
-    public void download(URI uri) throws IOException {
+    public void download(URI uri) {
         // Load previous state
-        Set<Integer> completedIndices = stateManager.loadState();
-        stateManager.saveState(completedIndices); // Initial save to ensure file exists
+        Set<Integer> completedIndices = segmentStateManager.loadState();
+        segmentStateManager.saveState(completedIndices); // Initial save to ensure file exists
 
         // Parse the playlist if not already parsed
         if (playlist == null) {
-            playlist = parser.parse(uri);
-            if (playlist.getSegments().isEmpty()) {
-                throw new IOException("No segments found in the playlist");
+            try {
+                playlist = parser.parse(uri);
+                if (playlist.getSegments().isEmpty()) {
+                    synchronized (lastNotifiedState) {
+                        stateCallback.onDownloadState(DownloadState.CANCELLED, "No segments found in playlist");
+                        lastNotifiedState.set(DownloadState.CANCELLED);
+                    }
+                    return;
+                }
+            } catch (IOException e) {
+                synchronized (lastNotifiedState) {
+                    stateCallback.onDownloadState(DownloadState.CANCELLED, "Failed to parse playlist: " + e.getMessage());
+                    lastNotifiedState.set(DownloadState.CANCELLED);
+                }
+                return;
             }
         }
 
@@ -107,39 +127,64 @@ public class HlsMediaProcessor {
             try (InputStream keyStream = fetcher.fetchContent(encryptionInfo.getUri())) {
                 byte[] key = keyStream.readAllBytes();
                 encryptionInfo.setKey(key);
+            } catch (IOException e) {
+                synchronized (lastNotifiedState) {
+                    stateCallback.onDownloadState(DownloadState.CANCELLED, "Failed to fetch key: " + e.getMessage());
+                    lastNotifiedState.set(DownloadState.CANCELLED);
+                }
+                return;
             }
         }
 
         // Create output directory
-        Files.createDirectories(Paths.get(outputDir));
+        try {
+            Files.createDirectories(Paths.get(outputDir));
+        } catch (IOException e) {
+            synchronized (lastNotifiedState) {
+                stateCallback.onDownloadState(DownloadState.CANCELLED, "Failed to create output directory: " + e.getMessage());
+                lastNotifiedState.set(DownloadState.CANCELLED);
+            }
+            return;
+        }
+
+        // Initialize executor and latch
+        executor = Executors.newFixedThreadPool(numThreads);
+        pauseLatch = new CountDownLatch(1);
+        synchronized (lastNotifiedState) {
+            if (lastNotifiedState.get() == DownloadState.STARTED) {
+                stateCallback.onDownloadState(DownloadState.STARTED, "");
+                lastNotifiedState.set(DownloadState.STARTED);
+            }
+        }
 
         // Download segments in parallel
         List<String> segmentFiles = Collections.synchronizedList(new ArrayList<>());
         ConcurrentSkipListSet<Integer> completedSet = new ConcurrentSkipListSet<>(completedIndices);
-        ExecutorService executor = Executors.newFixedThreadPool(numThreads);
         CountDownLatch latch = new CountDownLatch(segments.size() - completedSet.size());
 
         for (int i = 0; i < segments.size(); i++) {
-            if (completedSet.contains(i)) continue; // Skip already completed segments
+            if (completedSet.contains(i)) continue;
             int index = i;
             HlsParser.Segment segment = segments.get(i);
             executor.submit(() -> {
                 try {
+                    while (isPaused.get()) {
+                        pauseLatch.await();
+                        if (Thread.currentThread().isInterrupted()) break;
+                    }
+                    if (isCancelled.get() || Thread.currentThread().isInterrupted()) return;
                     String segmentFile = outputDir + "/segment_" + (index + 1) + ".ts";
                     try (InputStream in = processSegment(segment)) {
-                        Files.copy(in, Paths.get(segmentFile));
+                        Files.copy(in, Paths.get(segmentFile), StandardCopyOption.REPLACE_EXISTING);
                     }
                     segmentFiles.add(segmentFile);
-                    completedSet.add(index); // Add to completed set on success
-                    synchronized (stateManager) {
-                        stateManager.saveState(new HashSet<>(completedSet)); // Save state
+                    completedSet.add(index);
+                    synchronized (segmentStateManager) {
+                        segmentStateManager.saveState(new HashSet<>(completedSet));
                     }
                     progressCallback.onProgressUpdate(completedSet.size(), segments.size());
-                    if (Thread.currentThread().isInterrupted() || isCancelled.get()) {
-                        throw new IOException("Download cancelled");
-                    }
-                } catch (IOException e) {
-                    postProcessingCallback.onPostProcessingComplete(); // Trigger cancellation callback
+                } catch (IOException | InterruptedException e) {
+                    // Ignore, let cancellation or pause handle the state
                 } finally {
                     latch.countDown();
                 }
@@ -148,33 +193,50 @@ public class HlsMediaProcessor {
 
         try {
             latch.await();
+            if (isCancelled.get()) {
+                synchronized (lastNotifiedState) {
+                    if (lastNotifiedState.get() != DownloadState.CANCELLED) {
+                        stateCallback.onDownloadState(DownloadState.CANCELLED, "Cancelled by user");
+                        lastNotifiedState.set(DownloadState.CANCELLED);
+                    }
+                }
+                segmentStateManager.cleanupState();
+            } else if (isPaused.get()) {
+                synchronized (lastNotifiedState) {
+                    if (lastNotifiedState.get() != DownloadState.PAUSED && lastNotifiedState.get() != DownloadState.RESUMED) {
+                        stateCallback.onDownloadState(DownloadState.PAUSED, "");
+                        lastNotifiedState.set(DownloadState.PAUSED);
+                    }
+                }
+            } else if (completedSet.size() == segments.size()) {
+                for (int i = 0; i < segments.size(); i++) {
+                    String segmentFile = outputDir + "/segment_" + (i + 1) + ".ts";
+                    if (completedSet.contains(i) && !Files.exists(Paths.get(segmentFile))) {
+                        synchronized (lastNotifiedState) {
+                            stateCallback.onDownloadState(DownloadState.CANCELLED, "Missing segment file: " + segmentFile);
+                            lastNotifiedState.set(DownloadState.CANCELLED);
+                        }
+                        return;
+                    }
+                }
+                segmentCombiner.combineSegments(outputDir, outputFile, segments.size());
+                synchronized (lastNotifiedState) {
+                    if (lastNotifiedState.get() != DownloadState.COMPLETED) {
+                        stateCallback.onDownloadState(DownloadState.COMPLETED, "");
+                        lastNotifiedState.set(DownloadState.COMPLETED);
+                    }
+                }
+                segmentStateManager.cleanupState();
+            }
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Download interrupted", e);
-        } finally {
-            executor.shutdown();
-        }
-
-        if (!segmentFiles.isEmpty()) {
-            // Verify all required segment files exist before combining
-            for (int i = 0; i < segments.size(); i++) {
-                String segmentFile = outputDir + "/segment_" + (i + 1) + ".ts";
-                if (completedSet.contains(i) && !Files.exists(Paths.get(segmentFile))) {
-                    throw new IOException("Required segment file missing: " + segmentFile);
+            synchronized (lastNotifiedState) {
+                if (lastNotifiedState.get() != DownloadState.CANCELLED) {
+                    stateCallback.onDownloadState(DownloadState.CANCELLED, "Interrupted: " + e.getMessage());
+                    lastNotifiedState.set(DownloadState.CANCELLED);
                 }
             }
-
-            // Combine segments
-            segmentCombiner.combineSegments(outputDir, outputFile, segments.size());
-
-            // Trigger post-processing
-            postProcessingCallback.onPostProcessingComplete();
-
-            // Clean up state file after post-processing
-            stateManager.cleanupState();
-
-            // Trigger after post-processing callback
-            afterPostProcessingCallback.onAfterPostProcessingComplete();
+        } finally {
+            if (executor != null) executor.shutdown();
         }
     }
 
@@ -198,47 +260,53 @@ public class HlsMediaProcessor {
     }
 
     /**
+     * Pauses the ongoing download.
+     */
+    public void pause() {
+        isPaused.set(true);
+    }
+
+    /**
+     * Resumes a paused download.
+     */
+    public void resume() {
+        isPaused.set(false);
+        pauseLatch.countDown(); // Release waiting threads
+        pauseLatch = new CountDownLatch(1); // Reset for next pause
+        synchronized (lastNotifiedState) {
+            if (lastNotifiedState.get() == DownloadState.PAUSED) {
+                stateCallback.onDownloadState(DownloadState.RESUMED, "");
+                lastNotifiedState.set(DownloadState.RESUMED);
+            }
+        }
+    }
+
+    /**
      * Cancels the ongoing download.
      */
     public void cancel() {
         isCancelled.set(true);
+        if (executor != null) {
+            executor.shutdownNow(); // Interrupt all threads
+        }
     }
 
     /**
-     * Interface for managing download state, including loading, saving, and cleaning up state.
+     * Interface for managing segment download state, including loading, saving, and cleaning up state.
      */
-    public interface StateManager {
-        /**
-         * Loads the set of completed segment indices from persistent storage.
-         *
-         * @return The set of completed segment indices, or an empty set if no state exists.
-         * @throws IOException If an error occurs while reading the state.
-         */
+    public interface SegmentStateManager {
         Set<Integer> loadState() throws IOException;
-
-        /**
-         * Saves the set of completed segment indices to persistent storage.
-         *
-         * @param completedIndices The set of completed segment indices to save.
-         * @throws IOException If an error occurs while writing the state.
-         */
         void saveState(Set<Integer> completedIndices) throws IOException;
-
-        /**
-         * Cleans up the state file or storage after the download is complete.
-         *
-         * @throws IOException If an error occurs while cleaning up the state.
-         */
         void cleanupState() throws IOException;
     }
 
     /**
-     * Default implementation of StateManager using file-based persistence.
+     * Default implementation of SegmentStateManager using file-based persistence.
      */
-    private static class DefaultStateManager implements StateManager {
+    private static class DefaultSegmentStateManager implements SegmentStateManager {
         private final String stateFile;
 
-        DefaultStateManager(String stateFile) {
+        DefaultSegmentStateManager(String stateFile) {
             this.stateFile = stateFile;
         }
 
@@ -275,14 +343,6 @@ public class HlsMediaProcessor {
      * Interface for combining segments into a single output file.
      */
     public interface SegmentCombiner {
-        /**
-         * Combines the downloaded segments into a single output file.
-         *
-         * @param outputDir    The directory containing the segment files.
-         * @param outputFile   The path to the final combined file.
-         * @param segmentCount The number of segments to combine.
-         * @throws IOException If an error occurs during the combination process.
-         */
         void combineSegments(String outputDir, String outputFile, int segmentCount) throws IOException;
     }
 
@@ -295,7 +355,7 @@ public class HlsMediaProcessor {
             try (FileOutputStream fos = new FileOutputStream(outputFile, true)) {
                 for (int i = 1; i <= segmentCount; i++) {
                     String segmentFile = outputDir + "/segment_" + i + ".ts";
-                    if (!Files.exists(Paths.get(segmentFile))) continue; // Skip missing segments (already processed)
+                    if (!Files.exists(Paths.get(segmentFile))) continue;
                     try (FileInputStream fis = new FileInputStream(segmentFile)) {
                         byte[] buffer = new byte[1024];
                         int bytesRead;
@@ -314,15 +374,6 @@ public class HlsMediaProcessor {
      * Interface for decrypting segments.
      */
     public interface Decryptor {
-        /**
-         * Decrypts an encrypted segment using the provided key and encryption info.
-         *
-         * @param encryptedStream The encrypted segment data.
-         * @param key The decryption key.
-         * @param encryptionInfo The encryption metadata (e.g., IV).
-         * @return An InputStream containing the decrypted data.
-         * @throws IOException If decryption fails.
-         */
         InputStream decrypt(InputStream encryptedStream, byte[] key, HlsParser.EncryptionInfo encryptionInfo) throws IOException;
     }
 
@@ -332,7 +383,6 @@ public class HlsMediaProcessor {
     private static class DefaultDecryptor implements Decryptor {
         @Override
         public InputStream decrypt(InputStream encryptedStream, byte[] key, HlsParser.EncryptionInfo encryptionInfo) throws IOException {
-            // No-op: assumes the stream is already unencrypted
             return encryptedStream;
         }
     }
@@ -363,23 +413,16 @@ public class HlsMediaProcessor {
     }
 
     /**
-     * Callback interface for download progress updates, compatible with NewPipe's download system.
+     * Callback interface for download progress updates.
      */
     public interface DownloadProgressCallback {
         void onProgressUpdate(int progress, int totalSegments);
     }
 
     /**
-     * Callback interface for post-processing, compatible with NewPipe's post-processing infrastructure.
+     * Callback interface for download state changes.
      */
-    public interface PostProcessingCallback {
-        void onPostProcessingComplete();
-    }
-
-    /**
-     * Callback interface for actions after post-processing is complete.
-     */
-    public interface AfterPostProcessingCallback {
-        void onAfterPostProcessingComplete();
+    public interface DownloadStateCallback {
+        void onDownloadState(DownloadState state, String message);
     }
 }
