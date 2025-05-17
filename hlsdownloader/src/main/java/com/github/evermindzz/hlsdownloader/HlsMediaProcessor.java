@@ -30,6 +30,7 @@ public class HlsMediaProcessor {
     private final AtomicBoolean isCancelled;
     private final HlsParser.Fetcher fetcher;
     private final Decryptor decryptor;
+    private final int numThreads;
     private MediaPlaylist playlist; // Store playlist for resuming
 
     /**
@@ -40,6 +41,7 @@ public class HlsMediaProcessor {
      * @param outputFile                Final output file path for the combined segments.
      * @param fetcher                   Use this fetcher to download segments and keys.
      * @param decryptor                 Use this decryptor to decrypt segments.
+     * @param numThreads                Number of threads to use for parallel downloads.
      * @param stateManager              Handles loading, saving, and cleaning up state.
      * @param segmentCombiner           Handles combining segments.
      * @param progressCallback          Callback for download progress updates.
@@ -51,6 +53,7 @@ public class HlsMediaProcessor {
                          String outputFile,
                          HlsParser.Fetcher fetcher,
                          Decryptor decryptor,
+                         int numThreads,
                          StateManager stateManager,
                          SegmentCombiner segmentCombiner,
                          DownloadProgressCallback progressCallback,
@@ -62,6 +65,7 @@ public class HlsMediaProcessor {
         String stateFile = outputDir + "/download_state.txt";
         this.fetcher = fetcher != null ? fetcher : new DefaultFetcher();
         this.decryptor = decryptor != null ? decryptor : new DefaultDecryptor();
+        this.numThreads = Math.max(1, numThreads); // Ensure at least 1 thread
         this.stateManager = stateManager != null ? stateManager : new DefaultStateManager(stateFile);
         this.segmentCombiner = segmentCombiner != null ? segmentCombiner : new DefaultSegmentCombiner();
         this.progressCallback = progressCallback != null ? progressCallback : (progress, total) -> {};
@@ -112,7 +116,7 @@ public class HlsMediaProcessor {
         // Download segments in parallel
         List<String> segmentFiles = Collections.synchronizedList(new ArrayList<>());
         ConcurrentSkipListSet<Integer> completedSet = new ConcurrentSkipListSet<>(completedIndices);
-        ExecutorService executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+        ExecutorService executor = Executors.newFixedThreadPool(numThreads);
         CountDownLatch latch = new CountDownLatch(segments.size() - completedSet.size());
 
         for (int i = 0; i < segments.size(); i++) {
