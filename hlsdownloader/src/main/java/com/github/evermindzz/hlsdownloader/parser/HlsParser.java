@@ -1,6 +1,8 @@
 package com.github.evermindzz.hlsdownloader.parser;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -15,19 +17,19 @@ import java.util.regex.Pattern;
  */
 public class HlsParser {
     private final MasterPlaylistSelectionCallback callback;
-    private final Downloader downloader;
+    private final Fetcher fetcher;
     private final boolean strictMode;
 
     /**
      * Constructs a new HlsParser.
      *
      * @param callback    Callback to select a stream variant when parsing master playlists.
-     * @param downloader  Downloader strategy to fetch content.
+     * @param fetcher     Fetcher strategy to retrieve content.
      * @param strictMode  If true, unknown tags will throw exceptions. Otherwise, they're ignored.
      */
-    public HlsParser(MasterPlaylistSelectionCallback callback, Downloader downloader, boolean strictMode) {
+    public HlsParser(MasterPlaylistSelectionCallback callback, Fetcher fetcher, boolean strictMode) {
         this.callback = callback;
-        this.downloader = downloader;
+        this.fetcher = fetcher;
         this.strictMode = strictMode;
     }
 
@@ -38,15 +40,27 @@ public class HlsParser {
      * @throws IOException if downloading or parsing fails
      */
     public MediaPlaylist parse(URI uri) throws IOException {
-        String content = downloader.download(uri);
-        if (!content.startsWith("#EXTM3U")) {
-            throw new IOException("Invalid playlist: Missing #EXTM3U tag at the start.");
+        try (InputStream contentStream = fetcher.fetchContent(uri)) {
+            String content = convertStreamToString(contentStream);
+            if (!content.startsWith("#EXTM3U")) {
+                throw new IOException("Invalid playlist: Missing #EXTM3U tag at the start.");
+            }
+            if (content.contains("#EXT-X-STREAM-INF")) {
+                return parseMasterPlaylist(content, uri);
+            } else {
+                return parseMediaPlaylist(content, uri);
+            }
         }
-        if (content.contains("#EXT-X-STREAM-INF")) {
-            return parseMasterPlaylist(content, uri);
-        } else {
-            return parseMediaPlaylist(content, uri);
+    }
+
+    private String convertStreamToString(InputStream is) throws IOException {
+        ByteArrayOutputStream result = new ByteArrayOutputStream();
+        byte[] buffer = new byte[1024];
+        int length;
+        while ((length = is.read(buffer)) != -1) {
+            result.write(buffer, 0, length);
         }
+        return result.toString("UTF-8");
     }
 
     private MediaPlaylist parseMasterPlaylist(String content, URI baseUri) throws IOException {
@@ -121,7 +135,6 @@ public class HlsParser {
         }
 
         validatePlaylist(playlist);
-        // Further processing/callback with MediaPlaylist if needed
         return playlist;
     }
 
@@ -152,10 +165,22 @@ public class HlsParser {
     }
 
     /**
-     * Interface for downloading content from a given URI.
+     * Interface for fetching content from a URI.
      */
-    public interface Downloader {
-        String download(URI uri) throws IOException;
+    public interface Fetcher {
+        /**
+         * Fetches content from the specified URI.
+         *
+         * @param uri The URI to fetch content from.
+         * @return An InputStream containing the fetched data.
+         * @throws IOException If fetching fails.
+         */
+        InputStream fetchContent(URI uri) throws IOException;
+
+        /**
+         * Disconnects any active connections.
+         */
+        void disconnect();
     }
 
     // ===== Models =====
@@ -238,15 +263,19 @@ public class HlsParser {
         public String method;
         public URI uri;
         public String iv;
+        private byte[] key; // Added for caching the key
 
         public EncryptionInfo(String method, URI uri, String iv) {
             this.method = method;
             this.uri = uri;
             this.iv = iv;
+            this.key = null;
         }
 
         public String getMethod() { return method; }
         public URI getUri() { return uri; }
         public String getIv() { return iv; }
+        public byte[] getKey() { return key; }
+        public void setKey(byte[] key) { this.key = key; }
     }
 }
