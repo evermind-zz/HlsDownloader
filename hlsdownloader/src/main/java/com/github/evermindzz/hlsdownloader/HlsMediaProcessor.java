@@ -36,12 +36,21 @@ public class HlsMediaProcessor {
     private MediaPlaylist playlist; // Store playlist for resuming
     private ExecutorService executor;
     private CountDownLatch pauseLatch; // For pausing threads
-    private AtomicReference<DownloadState> lastNotifiedState; // Track last notified state
+    private final AtomicReference<DownloadState> lastNotifiedState; // Track last notified state
 
     // Enum for download states
     public enum DownloadState {
-        STARTED, PAUSED, RESUMED, CANCELLED, COMPLETED
+        STARTED, PAUSED, RESUMED, CANCELLED, COMPLETED, ERROR
     }
+
+    // Error message constants
+    private static final String ERROR_NO_SEGMENTS = "No segments found in playlist";
+    private static final String ERROR_PARSING_PLAYLIST = "Failed to parse playlist: %s";
+    private static final String ERROR_FETCHING_KEY = "Failed to fetch key: %s";
+    private static final String ERROR_CREATING_DIRECTORY = "Failed to create output directory: %s";
+    private static final String ERROR_MISSING_SEGMENT = "Missing segment file: %s";
+    private static final String MESSAGE_CANCELLED_BY_USER = "Cancelled by user";
+    private static final String MESSAGE_INTERRUPTED = "Interrupted: %s";
 
     /**
      * Constructs a new HlsMediaProcessor.
@@ -87,8 +96,9 @@ public class HlsMediaProcessor {
      * Downloads the HLS media playlist and its segments, with support for multi-threading.
      *
      * @param uri The URI of the HLS playlist.
+     * @throws IOException If an I/O error occurs during download, parsing, or state management.
      */
-    public void download(URI uri) {
+    public void download(URI uri) throws IOException {
         // Load previous state
         Set<Integer> completedIndices = segmentStateManager.loadState();
         segmentStateManager.saveState(completedIndices); // Initial save to ensure file exists
@@ -99,17 +109,18 @@ public class HlsMediaProcessor {
                 playlist = parser.parse(uri);
                 if (playlist.getSegments().isEmpty()) {
                     synchronized (lastNotifiedState) {
-                        stateCallback.onDownloadState(DownloadState.CANCELLED, "No segments found in playlist");
-                        lastNotifiedState.set(DownloadState.CANCELLED);
+                        stateCallback.onDownloadState(DownloadState.ERROR, ERROR_NO_SEGMENTS);
+                        lastNotifiedState.set(DownloadState.ERROR);
                     }
-                    return;
+                    throw new IOException(ERROR_NO_SEGMENTS);
                 }
             } catch (IOException e) {
                 synchronized (lastNotifiedState) {
-                    stateCallback.onDownloadState(DownloadState.CANCELLED, "Failed to parse playlist: " + e.getMessage());
-                    lastNotifiedState.set(DownloadState.CANCELLED);
+                    String message = String.format(ERROR_PARSING_PLAYLIST, e.getMessage());
+                    stateCallback.onDownloadState(DownloadState.ERROR, message);
+                    lastNotifiedState.set(DownloadState.ERROR);
                 }
-                return;
+                throw e;
             }
         }
 
@@ -129,10 +140,11 @@ public class HlsMediaProcessor {
                 encryptionInfo.setKey(key);
             } catch (IOException e) {
                 synchronized (lastNotifiedState) {
-                    stateCallback.onDownloadState(DownloadState.CANCELLED, "Failed to fetch key: " + e.getMessage());
-                    lastNotifiedState.set(DownloadState.CANCELLED);
+                    String message = String.format(ERROR_FETCHING_KEY, e.getMessage());
+                    stateCallback.onDownloadState(DownloadState.ERROR, message);
+                    lastNotifiedState.set(DownloadState.ERROR);
                 }
-                return;
+                throw e;
             }
         }
 
@@ -141,10 +153,11 @@ public class HlsMediaProcessor {
             Files.createDirectories(Paths.get(outputDir));
         } catch (IOException e) {
             synchronized (lastNotifiedState) {
-                stateCallback.onDownloadState(DownloadState.CANCELLED, "Failed to create output directory: " + e.getMessage());
-                lastNotifiedState.set(DownloadState.CANCELLED);
+                String message = String.format(ERROR_CREATING_DIRECTORY, e.getMessage());
+                stateCallback.onDownloadState(DownloadState.ERROR, message);
+                lastNotifiedState.set(DownloadState.ERROR);
             }
-            return;
+            throw e;
         }
 
         // Initialize executor and latch
@@ -196,7 +209,7 @@ public class HlsMediaProcessor {
             if (isCancelled.get()) {
                 synchronized (lastNotifiedState) {
                     if (lastNotifiedState.get() != DownloadState.CANCELLED) {
-                        stateCallback.onDownloadState(DownloadState.CANCELLED, "Cancelled by user");
+                        stateCallback.onDownloadState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
                         lastNotifiedState.set(DownloadState.CANCELLED);
                     }
                 }
@@ -213,10 +226,11 @@ public class HlsMediaProcessor {
                     String segmentFile = outputDir + "/segment_" + (i + 1) + ".ts";
                     if (completedSet.contains(i) && !Files.exists(Paths.get(segmentFile))) {
                         synchronized (lastNotifiedState) {
-                            stateCallback.onDownloadState(DownloadState.CANCELLED, "Missing segment file: " + segmentFile);
-                            lastNotifiedState.set(DownloadState.CANCELLED);
+                            String message = String.format(ERROR_MISSING_SEGMENT, segmentFile);
+                            stateCallback.onDownloadState(DownloadState.ERROR, message);
+                            lastNotifiedState.set(DownloadState.ERROR);
                         }
-                        return;
+                        throw new IOException(String.format(ERROR_MISSING_SEGMENT, segmentFile));
                     }
                 }
                 segmentCombiner.combineSegments(outputDir, outputFile, segments.size());
@@ -231,7 +245,8 @@ public class HlsMediaProcessor {
         } catch (InterruptedException e) {
             synchronized (lastNotifiedState) {
                 if (lastNotifiedState.get() != DownloadState.CANCELLED) {
-                    stateCallback.onDownloadState(DownloadState.CANCELLED, "Interrupted: " + e.getMessage());
+                    String message = String.format(MESSAGE_INTERRUPTED, e.getMessage());
+                    stateCallback.onDownloadState(DownloadState.CANCELLED, message);
                     lastNotifiedState.set(DownloadState.CANCELLED);
                 }
             }
