@@ -170,15 +170,16 @@ public class HlsMediaProcessor {
                     try {
                         // Check pause state
                         while (isPaused.get()) {
-                            pauseLatch.await();
-                            if (Thread.currentThread().isInterrupted()) return;
+                            pauseLatch.await(1, TimeUnit.SECONDS); // Periodic check with timeout
+                            if (Thread.interrupted()) return;
                         }
                         // Check cancellation
-                        if (isCancelled.get() || cancellationRequested.get() || Thread.currentThread().isInterrupted()) {
+                        if (isCancelled.get() || cancellationRequested.get() || Thread.interrupted()) {
                             return;
                         }
                         String segmentFile = outputDir + "/segment_" + (index + 1) + ".ts";
                         try (InputStream in = processSegment(segment)) {
+                            if (Thread.interrupted()) throw new InterruptedIOException();
                             Files.copy(in, Paths.get(segmentFile), StandardCopyOption.REPLACE_EXISTING);
                         }
                         completedSet.add(index);
@@ -251,10 +252,11 @@ public class HlsMediaProcessor {
      * @throws IOException If fetching or decryption fails.
      */
     private InputStream processSegment(HlsParser.Segment segment) throws IOException {
-        if (isCancelled.get() || cancellationRequested.get()) {
-            throw new IOException("Download cancelled");
+        if (isCancelled.get() || cancellationRequested.get() || Thread.interrupted()) {
+            throw new InterruptedIOException("Download cancelled");
         }
         InputStream segmentStream = fetcher.fetchContent(segment.getUri());
+        if (Thread.interrupted()) throw new InterruptedIOException();
         if (segment.getEncryptionInfo() != null) {
             byte[] key = segment.getEncryptionInfo().getKey();
             if (key == null) {
