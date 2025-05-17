@@ -13,6 +13,7 @@ import java.io.InputStream;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -80,7 +81,7 @@ class HlsMediaProcessorTest {
     }
 
     private void initHls(String playlistContent) {
-        initHls(playlistContent, new MockFetcher(playlistContent), new MockDecryptor(), 2);
+        initHls(playlistContent, new MockFetcher(playlistContent, true), new MockDecryptor(), 2);
     }
 
     private void initHls(String playlistContent, HlsParser.Fetcher fetcher, HlsMediaProcessor.Decryptor decryptor, int numThreads) {
@@ -121,15 +122,14 @@ class HlsMediaProcessorTest {
         initHls(TWO_SEGMENT_PLAYLIST);
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new MockFetcher(TWO_SEGMENT_PLAYLIST),
+                new MockFetcher(TWO_SEGMENT_PLAYLIST, true), // Enable delay for second segment
                 new MockDecryptor(),
-                2,
+                2, // Use 2 threads to simulate concurrency
                 new FileSegmentStateManager(stateFile),
                 null, // Use default SegmentCombiner
                 (progress, total) -> {
                     int count = segmentCounter.incrementAndGet();
                     if (count == 1) {
-                        downloader.cancel(); // Cancel after first segment
                         assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")), "First segment should exist");
                         assertFalse(Files.exists(Path.of(outputDir + "/segment_2.ts")), "Second segment should not exist yet");
                         firstSegmentLatch.countDown(); // Signal test thread
@@ -146,19 +146,28 @@ class HlsMediaProcessorTest {
             try {
                 downloader.download(URI.create("http://test/media.m3u8"));
             } catch (IOException e) {
-                if (!"Download cancelled".equals(e.getMessage())) {
-                    fail("Unexpected IOException: " + e.getMessage());
-                }
+                fail("Unexpected IOException: " + e.getMessage());
             }
         });
         downloadThread.start();
 
-        assertTrue(firstSegmentLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
-        downloadThread.join(2000); // Allow thread cleanup
+        // Start a separate thread to simulate external cancellation
+        Thread cancelThread = new Thread(() -> {
+            try {
+                assertTrue(firstSegmentLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
+                downloader.cancel(); // Cancel from a different thread
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        cancelThread.start();
+
+        downloadThread.join(6000); // Wait for download to complete or cancel
+        cancelThread.join(1000); // Ensure cancel thread finishes
 
         assertEquals(HlsMediaProcessor.DownloadState.CANCELLED, lastState.get(), "Should notify cancellation");
         assertEquals("Cancelled by user", lastMessage.get(), "Should provide cancellation reason");
-        assertFalse(Files.exists(Path.of(outputFile)));
+        assertFalse(Files.exists(Path.of(outputFile)), "Output file should not exist after cancellation");
         assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")), "First segment should exist");
         assertFalse(Files.exists(Path.of(outputDir + "/segment_2.ts")), "Second segment should not exist");
         Set<Integer> state = new FileSegmentStateManager(stateFile).loadState();
@@ -169,7 +178,7 @@ class HlsMediaProcessorTest {
     @Test
     void testDecryptWithKeyChange() throws IOException {
         AtomicInteger keyFetchCount = new AtomicInteger(0);
-        MockFetcher fetcher = new MockFetcher(DEFAULT_PLAYLIST) {
+        MockFetcher fetcher = new MockFetcher(DEFAULT_PLAYLIST, true) {
             @Override
             public InputStream fetchContent(URI uri) throws IOException {
                 if (uri != null && uri.toString().contains("key")) {
@@ -211,7 +220,7 @@ class HlsMediaProcessorTest {
         }
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new MockFetcher(TWO_SEGMENT_PLAYLIST),
+                new MockFetcher(TWO_SEGMENT_PLAYLIST, true),
                 new MockDecryptor(),
                 2,
                 new FileSegmentStateManager(stateFile),
@@ -250,7 +259,7 @@ class HlsMediaProcessorTest {
         AtomicReference<String> lastMessage = new AtomicReference<>();
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new MockFetcher(emptyPlaylist),
+                new MockFetcher(emptyPlaylist, true),
                 new MockDecryptor(),
                 2,
                 new FileSegmentStateManager(stateFile),
@@ -298,7 +307,7 @@ class HlsMediaProcessorTest {
 
         @Override
         public void saveState(Set<Integer> completedIndices) throws IOException {
-            Files.writeString(Path.of(stateFile), completedIndices.stream()
+            Files.writeString(Paths.get(stateFile), completedIndices.stream()
                     .sorted()
                     .map(Object::toString)
                     .collect(Collectors.joining(",")));
@@ -306,16 +315,18 @@ class HlsMediaProcessorTest {
 
         @Override
         public void cleanupState() throws IOException {
-            Files.deleteIfExists(Path.of(stateFile));
+            Files.deleteIfExists(Paths.get(stateFile));
         }
     }
 
     private static class MockFetcher implements HlsParser.Fetcher {
         final String content;
         protected final AtomicInteger segmentCounter = new AtomicInteger(0);
+        private final boolean delaySecondSegment;
 
-        MockFetcher(String content) {
+        MockFetcher(String content, boolean delaySecondSegment) {
             this.content = content;
+            this.delaySecondSegment = delaySecondSegment;
         }
 
         @Override
@@ -325,6 +336,14 @@ class HlsMediaProcessorTest {
                 byte[] data = new byte[1024];
                 for (int i = 0; i < data.length; i++) {
                     data[i] = reverseByte((byte) (segmentNum + i)); // mock encryption
+                }
+                // Introduce a delay for the second segment to allow cancellation
+                if (delaySecondSegment && segmentNum == 1) {
+                    try {
+                        Thread.sleep(2000); // 2-second delay for the second segment
+                    } catch (InterruptedException e) {
+
+                    }
                 }
                 return new ByteArrayInputStream(data);
             } else {
