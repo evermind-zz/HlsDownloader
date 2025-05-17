@@ -13,8 +13,8 @@ import java.nio.file.StandardCopyOption;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 
 /**
  * A downloader for HLS media playlists, designed to be Android-agnostic with hooks for integration
@@ -37,7 +37,7 @@ public class HlsMediaProcessor {
     private MediaPlaylist playlist; // Store playlist for resuming
     private ExecutorService executor;
     private CountDownLatch pauseLatch; // For pausing threads
-    private AtomicReference<DownloadState> lastNotifiedState; // Track last notified state
+    private AtomicReference<DownloadState> currentState; // Track current state
 
     // Enum for download states
     public enum DownloadState {
@@ -91,7 +91,7 @@ public class HlsMediaProcessor {
         this.isCancelled = new AtomicBoolean(false);
         this.isPaused = new AtomicBoolean(false);
         this.cancellationRequested = new AtomicBoolean(false);
-        this.lastNotifiedState = new AtomicReference<>(DownloadState.STARTED);
+        this.currentState = new AtomicReference<>(DownloadState.STARTED);
     }
 
     /**
@@ -110,18 +110,12 @@ public class HlsMediaProcessor {
             try {
                 playlist = parser.parse(uri);
                 if (playlist.getSegments().isEmpty()) {
-                    synchronized (lastNotifiedState) {
-                        stateCallback.onDownloadState(DownloadState.ERROR, ERROR_NO_SEGMENTS);
-                        lastNotifiedState.set(DownloadState.ERROR);
-                    }
+                    updateState(DownloadState.ERROR, ERROR_NO_SEGMENTS);
                     throw new IOException(ERROR_NO_SEGMENTS);
                 }
             } catch (IOException e) {
-                synchronized (lastNotifiedState) {
-                    String message = String.format(ERROR_PARSING_PLAYLIST, e.getMessage());
-                    stateCallback.onDownloadState(DownloadState.ERROR, message);
-                    lastNotifiedState.set(DownloadState.ERROR);
-                }
+                String message = String.format(ERROR_PARSING_PLAYLIST, e.getMessage());
+                updateState(DownloadState.ERROR, message);
                 throw e;
             }
         }
@@ -141,11 +135,8 @@ public class HlsMediaProcessor {
                 byte[] key = keyStream.readAllBytes();
                 encryptionInfo.setKey(key);
             } catch (IOException e) {
-                synchronized (lastNotifiedState) {
-                    String message = String.format(ERROR_FETCHING_KEY, e.getMessage());
-                    stateCallback.onDownloadState(DownloadState.ERROR, message);
-                    lastNotifiedState.set(DownloadState.ERROR);
-                }
+                String message = String.format(ERROR_FETCHING_KEY, e.getMessage());
+                updateState(DownloadState.ERROR, message);
                 throw e;
             }
         }
@@ -154,111 +145,100 @@ public class HlsMediaProcessor {
         try {
             Files.createDirectories(Paths.get(outputDir));
         } catch (IOException e) {
-            synchronized (lastNotifiedState) {
-                String message = String.format(ERROR_CREATING_DIRECTORY, e.getMessage());
-                stateCallback.onDownloadState(DownloadState.ERROR, message);
-                lastNotifiedState.set(DownloadState.ERROR);
-            }
+            String message = String.format(ERROR_CREATING_DIRECTORY, e.getMessage());
+            updateState(DownloadState.ERROR, message);
             throw e;
         }
 
-        // Initialize executor and latch
+        // Initialize executor and state
         executor = Executors.newFixedThreadPool(numThreads);
         pauseLatch = new CountDownLatch(1);
-        synchronized (lastNotifiedState) {
-            if (lastNotifiedState.get() == DownloadState.STARTED) {
-                stateCallback.onDownloadState(DownloadState.STARTED, "");
-                lastNotifiedState.set(DownloadState.STARTED);
-            }
-        }
-
-        // Download segments in parallel
-        List<String> segmentFiles = Collections.synchronizedList(new ArrayList<>());
-        ConcurrentSkipListSet<Integer> completedSet = new ConcurrentSkipListSet<>(completedIndices);
-        CountDownLatch latch = new CountDownLatch(segments.size() - completedSet.size());
-
-        for (int i = 0; i < segments.size(); i++) {
-            if (completedSet.contains(i)) continue;
-            int index = i;
-            HlsParser.Segment segment = segments.get(i);
-            executor.submit(() -> {
-                try {
-                    while (isPaused.get()) {
-                        pauseLatch.await();
-                        if (Thread.currentThread().isInterrupted()) return;
-                    }
-                    if (isCancelled.get() || Thread.currentThread().isInterrupted() || cancellationRequested.get()) return;
-                    String segmentFile = outputDir + "/segment_" + (index + 1) + ".ts";
-                    try (InputStream in = processSegment(segment)) {
-                        Files.copy(in, Paths.get(segmentFile), StandardCopyOption.REPLACE_EXISTING);
-                    }
-                    segmentFiles.add(segmentFile);
-                    completedSet.add(index);
-                    synchronized (segmentStateManager) {
-                        segmentStateManager.saveState(new HashSet<>(completedSet));
-                    }
-                    // Check cancellation before notifying progress
-                    if (isCancelled.get() || Thread.currentThread().isInterrupted() || cancellationRequested.get()) return;
-                    progressCallback.onProgressUpdate(completedSet.size(), segments.size());
-                } catch (IOException e) {
-                    // Log or handle IOException if needed
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt(); // Restore interrupted status
-                } finally {
-                    latch.countDown();
-                }
-            });
-        }
+        updateState(DownloadState.STARTED, "");
 
         try {
-            latch.await();
-            // Prioritize cancellation state over completion
+            // Download segments in parallel using CompletableFuture
+            List<CompletableFuture<Void>> futures = new ArrayList<>();
+            ConcurrentSkipListSet<Integer> completedSet = new ConcurrentSkipListSet<>(completedIndices);
+            AtomicInteger progress = new AtomicInteger(completedSet.size());
+
+            for (int i = 0; i < segments.size(); i++) {
+                if (completedSet.contains(i)) continue;
+                int index = i;
+                HlsParser.Segment segment = segments.get(i);
+                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                    try {
+                        // Check pause state
+                        while (isPaused.get()) {
+                            pauseLatch.await();
+                            if (Thread.currentThread().isInterrupted()) return;
+                        }
+                        // Check cancellation
+                        if (isCancelled.get() || cancellationRequested.get() || Thread.currentThread().isInterrupted()) {
+                            return;
+                        }
+                        String segmentFile = outputDir + "/segment_" + (index + 1) + ".ts";
+                        try (InputStream in = processSegment(segment)) {
+                            Files.copy(in, Paths.get(segmentFile), StandardCopyOption.REPLACE_EXISTING);
+                        }
+                        completedSet.add(index);
+                        synchronized (segmentStateManager) {
+                            segmentStateManager.saveState(new HashSet<>(completedSet));
+                        }
+                        int currentProgress = progress.incrementAndGet();
+                        progressCallback.onProgressUpdate(currentProgress, segments.size());
+                    } catch (IOException e) {
+                        // Log or handle IOException if needed
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt(); // Restore interrupted status
+                    }
+                }, executor);
+                futures.add(future);
+            }
+
+            // Wait for all futures to complete or be cancelled
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+            // Final state determination
             if (isCancelled.get() || cancellationRequested.get()) {
                 segmentStateManager.cleanupState();
-                synchronized (lastNotifiedState) {
-                    if (lastNotifiedState.get() != DownloadState.CANCELLED) {
-                        stateCallback.onDownloadState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
-                        lastNotifiedState.set(DownloadState.CANCELLED);
-                    }
-                }
+                updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
             } else if (isPaused.get()) {
-                synchronized (lastNotifiedState) {
-                    if (lastNotifiedState.get() != DownloadState.PAUSED && lastNotifiedState.get() != DownloadState.RESUMED) {
-                        stateCallback.onDownloadState(DownloadState.PAUSED, "");
-                        lastNotifiedState.set(DownloadState.PAUSED);
-                    }
-                }
+                updateState(DownloadState.PAUSED, "");
             } else if (completedSet.size() == segments.size()) {
                 for (int i = 0; i < segments.size(); i++) {
                     String segmentFile = outputDir + "/segment_" + (i + 1) + ".ts";
                     if (completedSet.contains(i) && !Files.exists(Paths.get(segmentFile))) {
-                        synchronized (lastNotifiedState) {
-                            String message = String.format(ERROR_MISSING_SEGMENT, segmentFile);
-                            stateCallback.onDownloadState(DownloadState.ERROR, message);
-                            lastNotifiedState.set(DownloadState.ERROR);
-                        }
-                        throw new IOException(String.format(ERROR_MISSING_SEGMENT, segmentFile));
+                        String message = String.format(ERROR_MISSING_SEGMENT, segmentFile);
+                        updateState(DownloadState.ERROR, message);
+                        throw new IOException(message);
                     }
                 }
                 segmentCombiner.combineSegments(outputDir, outputFile, segments.size());
-                synchronized (lastNotifiedState) {
-                    if (lastNotifiedState.get() != DownloadState.COMPLETED && !cancellationRequested.get()) {
-                        stateCallback.onDownloadState(DownloadState.COMPLETED, "");
-                        lastNotifiedState.set(DownloadState.COMPLETED);
-                    }
-                }
+                updateState(DownloadState.COMPLETED, "");
                 segmentStateManager.cleanupState();
+            } else {
+                updateState(DownloadState.ERROR, "Incomplete download");
             }
-        } catch (InterruptedException e) {
-            synchronized (lastNotifiedState) {
-                if (lastNotifiedState.get() != DownloadState.CANCELLED) {
-                    String message = String.format(MESSAGE_INTERRUPTED, e.getMessage());
-                    stateCallback.onDownloadState(DownloadState.CANCELLED, message);
-                    lastNotifiedState.set(DownloadState.CANCELLED);
-                }
+        } catch (CompletionException e) {
+            if (e.getCause() instanceof IOException) {
+                updateState(DownloadState.ERROR, e.getCause().getMessage());
+                throw (IOException) e.getCause();
+            } else if (e.getCause() instanceof InterruptedException) {
+                updateState(DownloadState.CANCELLED, MESSAGE_INTERRUPTED);
+            } else {
+                updateState(DownloadState.ERROR, e.getCause().getMessage());
             }
         } finally {
-            if (executor != null) executor.shutdown();
+            if (executor != null) {
+                executor.shutdownNow();
+                try {
+                    if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                        // Log if termination takes too long
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
         }
     }
 
@@ -270,6 +250,9 @@ public class HlsMediaProcessor {
      * @throws IOException If fetching or decryption fails.
      */
     private InputStream processSegment(HlsParser.Segment segment) throws IOException {
+        if (isCancelled.get() || cancellationRequested.get()) {
+            throw new IOException("Download cancelled");
+        }
         InputStream segmentStream = fetcher.fetchContent(segment.getUri());
         if (segment.getEncryptionInfo() != null) {
             byte[] key = segment.getEncryptionInfo().getKey();
@@ -286,6 +269,7 @@ public class HlsMediaProcessor {
      */
     public void pause() {
         isPaused.set(true);
+        updateState(DownloadState.PAUSED, "");
     }
 
     /**
@@ -295,12 +279,7 @@ public class HlsMediaProcessor {
         isPaused.set(false);
         pauseLatch.countDown(); // Release waiting threads
         pauseLatch = new CountDownLatch(1); // Reset for next pause
-        synchronized (lastNotifiedState) {
-            if (lastNotifiedState.get() == DownloadState.PAUSED) {
-                stateCallback.onDownloadState(DownloadState.RESUMED, "");
-                lastNotifiedState.set(DownloadState.RESUMED);
-            }
-        }
+        updateState(DownloadState.RESUMED, "");
     }
 
     /**
@@ -308,16 +287,22 @@ public class HlsMediaProcessor {
      */
     public void cancel() {
         cancellationRequested.set(true);
-        synchronized (lastNotifiedState) {
-            if (lastNotifiedState.get() != DownloadState.CANCELLED) {
-                stateCallback.onDownloadState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
-                lastNotifiedState.set(DownloadState.CANCELLED);
-            }
-        }
+        isCancelled.set(true);
+        updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
         if (executor != null) {
-            isCancelled.set(true); // Set after state update to ensure consistency
             executor.shutdownNow(); // Interrupt all threads
         }
+    }
+
+    /**
+     * Updates the download state and notifies the callback.
+     *
+     * @param state   The new state.
+     * @param message The message associated with the state change.
+     */
+    private void updateState(DownloadState state, String message) {
+        currentState.set(state);
+        stateCallback.onDownloadState(state, message);
     }
 
     /**
