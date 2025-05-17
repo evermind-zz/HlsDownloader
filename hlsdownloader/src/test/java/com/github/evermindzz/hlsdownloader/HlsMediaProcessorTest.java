@@ -98,9 +98,7 @@ class HlsMediaProcessorTest {
                 new FileSegmentStateManager(stateFile),
                 null, // Use default SegmentCombiner
                 (progress, total) -> {},
-                (state, message) -> {},
-                () -> {}
-        );
+                (state, message) -> {});
     }
 
     @Test
@@ -114,7 +112,7 @@ class HlsMediaProcessorTest {
     }
 
     @Test
-    void testCancelDuringDownload() throws InterruptedException {
+    void testCancelDuringDownload() throws InterruptedException, IOException {
         CountDownLatch firstSegmentLatch = new CountDownLatch(1);
         AtomicInteger segmentCounter = new AtomicInteger(0);
         AtomicReference<HlsMediaProcessor.DownloadState> lastState = new AtomicReference<>();
@@ -142,11 +140,17 @@ class HlsMediaProcessorTest {
                 (state, message) -> {
                     lastState.set(state);
                     lastMessage.set(message);
-                },
-                () -> {}
-        );
+                });
 
-        Thread downloadThread = new Thread(() -> downloader.download(URI.create("http://test/media.m3u8")));
+        Thread downloadThread = new Thread(() -> {
+            try {
+                downloader.download(URI.create("http://test/media.m3u8"));
+            } catch (IOException e) {
+                if (!"Download cancelled".equals(e.getMessage())) {
+                    fail("Unexpected IOException: " + e.getMessage());
+                }
+            }
+        });
         downloadThread.start();
 
         assertTrue(firstSegmentLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
@@ -197,7 +201,7 @@ class HlsMediaProcessorTest {
     }
 
     @Test
-    void testSegmentFileOverwrites() throws InterruptedException {
+    void testSegmentFileOverwrites() throws InterruptedException, IOException {
         // Pre-create a segment file with different content
         String segmentFile = outputDir + "/segment_1.ts";
         try {
@@ -213,11 +217,15 @@ class HlsMediaProcessorTest {
                 new FileSegmentStateManager(stateFile),
                 null,
                 (progress, total) -> {},
-                (state, message) -> {},
-                () -> {}
-        );
+                (state, message) -> {});
 
-        Thread downloadThread = new Thread(() -> downloader.download(URI.create("http://test/media.m3u8")));
+        Thread downloadThread = new Thread(() -> {
+            try {
+                downloader.download(URI.create("http://test/media.m3u8"));
+            } catch (IOException e) {
+                fail("Unexpected IOException: " + e.getMessage());
+            }
+        });
         downloadThread.start();
         downloadThread.join(5000); // Allow download to complete
 
@@ -231,6 +239,35 @@ class HlsMediaProcessorTest {
             assertArrayEquals(expectedData, content, "Segment file should be overwritten with new content");
         } catch (IOException e) {
             fail("Failed to read segment file: " + e.getMessage());
+        }
+    }
+
+    @Test
+    void testErrorOnEmptyPlaylist() throws IOException {
+        String emptyPlaylist = "#EXTM3U\n#EXT-X-ENDLIST";
+        initHls(emptyPlaylist);
+        AtomicReference<HlsMediaProcessor.DownloadState> lastState = new AtomicReference<>();
+        AtomicReference<String> lastMessage = new AtomicReference<>();
+
+        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+                new MockFetcher(emptyPlaylist),
+                new MockDecryptor(),
+                2,
+                new FileSegmentStateManager(stateFile),
+                null,
+                (progress, total) -> {},
+                (state, message) -> {
+                    lastState.set(state);
+                    lastMessage.set(message);
+                });
+
+        try {
+            downloader.download(URI.create("http://test/media.m3u8"));
+            fail("Should throw IOException for empty playlist");
+        } catch (IOException e) {
+            assertEquals(HlsMediaProcessor.DownloadState.ERROR, lastState.get(), "Should notify ERROR state");
+            assertEquals("No segments found in playlist", lastMessage.get(), "Should provide correct error message");
+            assertEquals("No segments found in playlist", e.getMessage(), "Exception message should match");
         }
     }
 
