@@ -30,13 +30,14 @@ public class HlsMediaProcessor {
     private final SegmentCombiner segmentCombiner;
     private final AtomicBoolean isCancelled;
     private final AtomicBoolean isPaused;
+    private final AtomicBoolean cancellationRequested;
     private final HlsParser.Fetcher fetcher;
     private final Decryptor decryptor;
     private final int numThreads;
     private MediaPlaylist playlist; // Store playlist for resuming
     private ExecutorService executor;
     private CountDownLatch pauseLatch; // For pausing threads
-    private final AtomicReference<DownloadState> lastNotifiedState; // Track last notified state
+    private AtomicReference<DownloadState> lastNotifiedState; // Track last notified state
 
     // Enum for download states
     public enum DownloadState {
@@ -89,6 +90,7 @@ public class HlsMediaProcessor {
         this.stateCallback = stateCallback != null ? stateCallback : (state, message) -> {};
         this.isCancelled = new AtomicBoolean(false);
         this.isPaused = new AtomicBoolean(false);
+        this.cancellationRequested = new AtomicBoolean(false);
         this.lastNotifiedState = new AtomicReference<>(DownloadState.STARTED);
     }
 
@@ -183,9 +185,9 @@ public class HlsMediaProcessor {
                 try {
                     while (isPaused.get()) {
                         pauseLatch.await();
-                        if (Thread.currentThread().isInterrupted()) break;
+                        if (Thread.currentThread().isInterrupted()) return;
                     }
-                    if (isCancelled.get() || Thread.currentThread().isInterrupted()) return;
+                    if (isCancelled.get() || Thread.currentThread().isInterrupted() || cancellationRequested.get()) return;
                     String segmentFile = outputDir + "/segment_" + (index + 1) + ".ts";
                     try (InputStream in = processSegment(segment)) {
                         Files.copy(in, Paths.get(segmentFile), StandardCopyOption.REPLACE_EXISTING);
@@ -195,9 +197,13 @@ public class HlsMediaProcessor {
                     synchronized (segmentStateManager) {
                         segmentStateManager.saveState(new HashSet<>(completedSet));
                     }
+                    // Check cancellation before notifying progress
+                    if (isCancelled.get() || Thread.currentThread().isInterrupted() || cancellationRequested.get()) return;
                     progressCallback.onProgressUpdate(completedSet.size(), segments.size());
-                } catch (IOException | InterruptedException e) {
-                    // Ignore, let cancellation or pause handle the state
+                } catch (IOException e) {
+                    // Log or handle IOException if needed
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt(); // Restore interrupted status
                 } finally {
                     latch.countDown();
                 }
@@ -206,13 +212,8 @@ public class HlsMediaProcessor {
 
         try {
             latch.await();
-            if (isCancelled.get()) {
-                synchronized (lastNotifiedState) {
-                    if (lastNotifiedState.get() != DownloadState.CANCELLED) {
-                        stateCallback.onDownloadState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
-                        lastNotifiedState.set(DownloadState.CANCELLED);
-                    }
-                }
+            if (isCancelled.get() || cancellationRequested.get()) {
+                // State should already be set by cancel()
                 segmentStateManager.cleanupState();
             } else if (isPaused.get()) {
                 synchronized (lastNotifiedState) {
@@ -300,8 +301,15 @@ public class HlsMediaProcessor {
      * Cancels the ongoing download.
      */
     public void cancel() {
-        isCancelled.set(true);
+        cancellationRequested.set(true);
+        synchronized (lastNotifiedState) {
+            if (lastNotifiedState.get() != DownloadState.CANCELLED) {
+                stateCallback.onDownloadState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
+                lastNotifiedState.set(DownloadState.CANCELLED);
+            }
+        }
         if (executor != null) {
+            isCancelled.set(true); // Set after state update to ensure consistency
             executor.shutdownNow(); // Interrupt all threads
         }
     }
