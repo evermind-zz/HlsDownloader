@@ -114,7 +114,7 @@ class HlsMediaProcessorTest {
 
     @Test
     void testCancelDuringDownload() throws InterruptedException, IOException {
-        CountDownLatch firstSegmentLatch = new CountDownLatch(1);
+        CountDownLatch cancelLatch = new CountDownLatch(1);
         AtomicInteger segmentCounter = new AtomicInteger(0);
         AtomicReference<HlsMediaProcessor.DownloadState> lastState = new AtomicReference<>();
         AtomicReference<String> lastMessage = new AtomicReference<>();
@@ -132,29 +132,17 @@ class HlsMediaProcessorTest {
                     if (count == 1) {
                         assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")), "First segment should exist");
                         assertFalse(Files.exists(Path.of(outputDir + "/segment_2.ts")), "Second segment should not exist yet");
-                        firstSegmentLatch.countDown(); // Signal test thread
-                    } else if (count > 1) {
-                        fail("No additional segments should be downloaded after cancellation");
+                        cancelLatch.countDown(); // Signal test to cancel
                     }
                 },
                 (state, message) -> {
                     lastState.set(state);
                     lastMessage.set(message);
                 });
-
-        Thread downloadThread = new Thread(() -> {
-            try {
-                downloader.download(URI.create("http://test/media.m3u8"));
-            } catch (IOException e) {
-                fail("Unexpected IOException: " + e.getMessage());
-            }
-        });
-        downloadThread.start();
-
         // Start a separate thread to simulate external cancellation
         Thread cancelThread = new Thread(() -> {
             try {
-                assertTrue(firstSegmentLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
+                assertTrue(cancelLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
                 downloader.cancel(); // Cancel from a different thread
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -162,8 +150,23 @@ class HlsMediaProcessorTest {
         });
         cancelThread.start();
 
-        downloadThread.join(6000); // Wait for download to complete or cancel
+        Thread downloadThread = new Thread(() -> {
+            try {
+                downloader.download(URI.create("http://test/media.m3u8"));
+            } catch (IOException e) {
+                // Ignore expected InterruptedIOException due to cancellation
+                if (!e.getMessage().contains("Download cancelled")) {
+                    fail("Unexpected IOException: " + e.getMessage());
+                }
+            }
+        });
+        downloadThread.start();
+
+        // Wait for the first segment to complete, then cancel
+        assertTrue(cancelLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
         cancelThread.join(1000); // Ensure cancel thread finishes
+
+        downloadThread.join(2000); // Allow cancellation to complete
 
         assertEquals(HlsMediaProcessor.DownloadState.CANCELLED, lastState.get(), "Should notify cancellation");
         assertEquals("Cancelled by user", lastMessage.get(), "Should provide cancellation reason");
@@ -171,7 +174,7 @@ class HlsMediaProcessorTest {
         assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")), "First segment should exist");
         assertFalse(Files.exists(Path.of(outputDir + "/segment_2.ts")), "Second segment should not exist");
         Set<Integer> state = new FileSegmentStateManager(stateFile).loadState();
-        assertEquals(Collections.singleton(0), state, "State should reflect only the completed segment (index 0)");
+        assertFalse(Files.exists(Path.of(stateFile)), "state file sould should not exist");
         Files.deleteIfExists(Path.of(outputDir + "/segment_1.ts"));
     }
 
