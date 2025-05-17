@@ -5,13 +5,17 @@ import com.github.evermindzz.hlsdownloader.parser.HlsParser.EncryptionInfo;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -47,7 +51,7 @@ class HlsParserTest {
             assertEquals("1280x720", selected.getResolution());
             // Replace variant URI with test media URI
             return new VariantStream(mediaUri, selected.getBandwidth(), selected.getResolution(), selected.getCodecs());
-        }, new MockDownloader(mediaContent),
+        }, new MockFetcher(mediaContent),
                 true);
 
         parser.parse(dummyMasterUri); // Will parse master, callback, then media
@@ -63,13 +67,12 @@ class HlsParserTest {
                 "segment2.ts\n" +
                 "#EXT-X-ENDLIST";
 
-
         URI dummyUri = URI.create("http://example.com/media.m3u8");
 
         HlsParser parser = new HlsParser(variants -> {
             fail("Should not call variant selector for media playlist");
             return null;
-        }, new MockDownloader(mediaContent),
+        }, new MockFetcher(mediaContent),
                 true);
 
         parser.parse(dummyUri); // Should log warning due to duration > target
@@ -96,7 +99,7 @@ class HlsParserTest {
                     fail("Should not be called for media playlist");
                     return null;
                 },
-                new MockDownloader(playlistContent),
+                new MockFetcher(playlistContent),
                 true
         );
 
@@ -110,11 +113,18 @@ class HlsParserTest {
         assertEquals("AES-128", encryptionInfo.getMethod());
         assertEquals(URI.create("https://example.com/key.key"), encryptionInfo.getUri());
         assertEquals("0xabcdef", encryptionInfo.getIv());
+        assertNull(encryptionInfo.getKey(), "Key should be null before pre-fetching");
 
-        // should contain same encryption info that first segment
+        // Simulate pre-fetching key for testing
+        byte[] mockKey = "mockkey".getBytes();
+        encryptionInfo.setKey(mockKey);
+        assertArrayEquals(mockKey, encryptionInfo.getKey(), "Key should be set after pre-fetching");
+
+        // Should contain same encryption info that first segment
         segment = result.getSegments().get(1);
         EncryptionInfo encryptionInfo2 = segment.getEncryptionInfo();
         assertEquals(encryptionInfo2, encryptionInfo);
+        assertArrayEquals(mockKey, encryptionInfo2.getKey(), "Key should be shared between segments with same info");
 
         segment = result.getSegments().get(2);
         encryptionInfo = segment.getEncryptionInfo();
@@ -122,6 +132,7 @@ class HlsParserTest {
         assertEquals("AES-128", encryptionInfo.getMethod());
         assertEquals(URI.create("https://example.com/key.key"), encryptionInfo.getUri());
         assertEquals("0x123456", encryptionInfo.getIv());
+        assertNull(encryptionInfo.getKey(), "Key should be null for new encryption info");
     }
 
     @Test
@@ -137,7 +148,7 @@ class HlsParserTest {
 
         URI baseUri = URI.create("http://test/");
 
-        HlsParser parser = new HlsParser(new DummyCallback(), new MockDownloader(playlist), false);
+        HlsParser parser = new HlsParser(new DummyCallback(), new MockFetcher(playlist), false);
         HlsParser.MediaPlaylist result = parser.parse(baseUri);
 
         assertNotNull(result);
@@ -148,6 +159,7 @@ class HlsParserTest {
         assertEquals("AES-128", encryptionInfo.getMethod());
         assertEquals("http://test/key.key", encryptionInfo.getUri().toString());
         assertEquals("0xabcdef", encryptionInfo.getIv());
+        assertNull(encryptionInfo.getKey(), "Key should be null before pre-fetching");
     }
 
     @Test
@@ -160,7 +172,7 @@ class HlsParserTest {
 
         URI baseUri = URI.create("http://test/");
 
-        HlsParser parser = new HlsParser(new DummyCallback(), new MockDownloader(invalidPlaylist), true);
+        HlsParser parser = new HlsParser(new DummyCallback(), new MockFetcher(invalidPlaylist), true);
 
         IOException ex = assertThrows(IOException.class, () -> parser.parse(baseUri));
         assertTrue(ex.getMessage().contains("Unsupported or unknown tag"));
@@ -176,7 +188,7 @@ class HlsParserTest {
 
         URI baseUri = URI.create("http://example.com/");
 
-        HlsParser parser = new HlsParser(new DummyCallback(), new MockDownloader(playlist), false);
+        HlsParser parser = new HlsParser(new DummyCallback(), new MockFetcher(playlist), false);
         HlsParser.MediaPlaylist result = parser.parse(baseUri);
 
         assertNotNull(result);
@@ -195,7 +207,7 @@ class HlsParserTest {
 
         URI baseUri = URI.create("http://test/");
 
-        HlsParser parser = new HlsParser(new DummyCallback(), new MockDownloader(playlist), true);
+        HlsParser parser = new HlsParser(new DummyCallback(), new MockFetcher(playlist), true);
         HlsParser.MediaPlaylist result = parser.parse(baseUri);
 
         assertNotNull(result);
@@ -214,7 +226,7 @@ class HlsParserTest {
 
         URI baseUri = URI.create("http://test/");
 
-        HlsParser parser = new HlsParser(new DummyCallback(), new MockDownloader(playlist), true);
+        HlsParser parser = new HlsParser(new DummyCallback(), new MockFetcher(playlist), true);
 
         IOException ex = assertThrows(IOException.class, () -> parser.parse(baseUri));
         assertTrue(ex.getMessage().contains("Invalid playlist: Missing #EXTM3U"));
@@ -232,22 +244,27 @@ class HlsParserTest {
 
         URI baseUri = URI.create("http://test/");
 
-        HlsParser parser = new HlsParser(new DummyCallback(), new MockDownloader(playlist), true);
+        HlsParser parser = new HlsParser(new DummyCallback(), new MockFetcher(playlist), true);
 
         IOException ex = assertThrows(IOException.class, () -> parser.parse(baseUri));
         assertTrue(ex.getMessage().contains("Invalid playlist: Missing #EXTM3U"));
     }
 
-    static class MockDownloader implements HlsParser.Downloader {
+    static class MockFetcher implements HlsParser.Fetcher {
         final String content;
 
-        MockDownloader(String content) {
+        MockFetcher(String content) {
             this.content = content;
         }
 
         @Override
-        public String download(URI uri) {
-            return content;
+        public InputStream fetchContent(URI uri) throws IOException {
+            return new ByteArrayInputStream(content != null ? content.getBytes(StandardCharsets.UTF_8) : new byte[0]);
+        }
+
+        @Override
+        public void disconnect() {
+            // No-op for test
         }
     }
 
