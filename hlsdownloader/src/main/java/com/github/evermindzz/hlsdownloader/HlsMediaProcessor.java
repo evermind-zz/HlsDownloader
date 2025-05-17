@@ -212,9 +212,15 @@ public class HlsMediaProcessor {
 
         try {
             latch.await();
+            // Prioritize cancellation state over completion
             if (isCancelled.get() || cancellationRequested.get()) {
-                // State should already be set by cancel()
                 segmentStateManager.cleanupState();
+                synchronized (lastNotifiedState) {
+                    if (lastNotifiedState.get() != DownloadState.CANCELLED) {
+                        stateCallback.onDownloadState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
+                        lastNotifiedState.set(DownloadState.CANCELLED);
+                    }
+                }
             } else if (isPaused.get()) {
                 synchronized (lastNotifiedState) {
                     if (lastNotifiedState.get() != DownloadState.PAUSED && lastNotifiedState.get() != DownloadState.RESUMED) {
@@ -236,7 +242,7 @@ public class HlsMediaProcessor {
                 }
                 segmentCombiner.combineSegments(outputDir, outputFile, segments.size());
                 synchronized (lastNotifiedState) {
-                    if (lastNotifiedState.get() != DownloadState.COMPLETED) {
+                    if (lastNotifiedState.get() != DownloadState.COMPLETED && !cancellationRequested.get()) {
                         stateCallback.onDownloadState(DownloadState.COMPLETED, "");
                         lastNotifiedState.set(DownloadState.COMPLETED);
                     }
