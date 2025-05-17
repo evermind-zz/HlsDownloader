@@ -229,6 +229,7 @@ class HlsMediaProcessorTest {
 
     private static class MockFetcher implements HlsParser.Fetcher {
         final String content;
+        protected final AtomicInteger segmentCounter = new AtomicInteger(0);
 
         MockFetcher(String content) {
             this.content = content;
@@ -236,7 +237,16 @@ class HlsMediaProcessorTest {
 
         @Override
         public InputStream fetchContent(URI uri) throws IOException {
-            return new ByteArrayInputStream(content != null ? content.getBytes() : new byte[1024]);
+            if (uri.getPath().contains("segment")) {
+                int segmentNum = segmentCounter.getAndIncrement();
+                byte[] data = new byte[1024];
+                for (int i = 0; i < data.length; i++) {
+                    data[i] = reverseByte((byte) (segmentNum + i)); // mock encryption
+                }
+                return new ByteArrayInputStream(data);
+            } else {
+                return new ByteArrayInputStream(content.getBytes());
+            }
         }
 
         @Override
@@ -265,9 +275,13 @@ class HlsMediaProcessorTest {
                 key = keys[Math.min(index, keys.length - 1)];
             }
             for (int i = 0; i < encryptedData.length; i++) {
-                decryptedData[i] = (byte) (255 - encryptedData[i]); // Reverse mock encryption
+                decryptedData[i] = reverseByte(encryptedData[i]); // Reverse mock encryption
             }
             return new ByteArrayInputStream(decryptedData);
         }
+    }
+
+    static byte reverseByte(byte b) {
+        return (byte) (Integer.reverse(b) >>> (Integer.SIZE - Byte.SIZE));
     }
 }
