@@ -4,12 +4,16 @@ import com.github.evermindzz.hlsdownloader.parser.HlsParser;
 import com.github.evermindzz.hlsdownloader.parser.HlsParser.MediaPlaylist;
 import com.github.evermindzz.hlsdownloader.parser.HlsParser.Segment;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.security.GeneralSecurityException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -51,6 +55,7 @@ public class HlsMediaProcessor {
     private static final String ERROR_FETCHING_KEY = "Failed to fetch key: %s";
     private static final String ERROR_CREATING_DIRECTORY = "Failed to create output directory: %s";
     private static final String ERROR_MISSING_SEGMENT = "Missing segment file: %s";
+    private static final String ERROR_DECRYPTION_FAILED = "Decryption failed: %s";
     private static final String MESSAGE_CANCELLED_BY_USER = "Cancelled by user";
     private static final String MESSAGE_INTERRUPTED = "Interrupted: %s";
 
@@ -135,6 +140,9 @@ public class HlsMediaProcessor {
         for (HlsParser.EncryptionInfo encryptionInfo : uniqueEncryptionInfos) {
             try (InputStream keyStream = fetcher.fetchContent(encryptionInfo.getUri())) {
                 byte[] key = keyStream.readAllBytes();
+                if (key.length != 16) {
+                    throw new IOException("Invalid key length: expected 16 bytes, got " + key.length);
+                }
                 encryptionInfo.setKey(key);
             } catch (IOException e) {
                 String message = String.format(ERROR_FETCHING_KEY, e.getMessage());
@@ -153,7 +161,14 @@ public class HlsMediaProcessor {
         }
 
         // Initialize executor and state
-        executor = Executors.newFixedThreadPool(numThreads);
+        executor = Executors.newFixedThreadPool(numThreads, r -> {
+            Thread t = new Thread(r);
+            t.setUncaughtExceptionHandler((thread, ex) -> {
+                System.err.println("Thread " + thread.getName() + " terminated with exception: " + ex.getMessage());
+                ex.printStackTrace();
+            });
+            return t;
+        });
         pauseLatch = new CountDownLatch(1);
         updateState(DownloadState.STARTED, "");
 
@@ -179,7 +194,7 @@ public class HlsMediaProcessor {
                             return;
                         }
                         String segmentFile = outputDir + "/segment_" + (index + 1) + ".ts";
-                        try (InputStream in = processSegment(segment)) {
+                        try (InputStream in = processSegment(segment, index)) {
                             if (Thread.interrupted() || isCancelled.get() || cancellationRequested.get()) {
                                 throw new InterruptedIOException("Download cancelled during I/O");
                             }
@@ -196,7 +211,8 @@ public class HlsMediaProcessor {
                             throw new InterruptedIOException("Download cancelled after progress");
                         }
                     } catch (IOException e) {
-                        // Log or handle IOException if needed
+                        System.err.println("HLSIOException in thread: " + Thread.currentThread().getName() + ", " + e.getMessage());
+                        throw e;
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt(); // Restore interrupted status
                     }
@@ -229,24 +245,33 @@ public class HlsMediaProcessor {
                 updateState(DownloadState.ERROR, "Incomplete download");
             }
         } catch (CompletionException e) {
-            if (e.getCause() instanceof IOException) {
+            if (e.getCause() instanceof InterruptedIOException) {
+                segmentStateManager.cleanupState();
+                updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
+            } else if (e.getCause() instanceof IOException) {
                 updateState(DownloadState.ERROR, e.getCause().getMessage());
                 throw (IOException) e.getCause();
             } else if (e.getCause() instanceof InterruptedException) {
+                segmentStateManager.cleanupState();
                 updateState(DownloadState.CANCELLED, MESSAGE_INTERRUPTED);
             } else {
                 updateState(DownloadState.ERROR, e.getCause().getMessage());
+                throw new IOException(e.getCause());
             }
         } finally {
             if (executor != null) {
                 executor.shutdownNow();
                 try {
                     if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
-                        // Log if termination takes too long
+                        System.err.println("Executor did not terminate in time");
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
+            }
+            if (isCancelled.get() || cancellationRequested.get()) {
+                segmentStateManager.cleanupState();
+                updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
             }
         }
     }
@@ -255,10 +280,11 @@ public class HlsMediaProcessor {
      * Processes a segment by fetching its content and decrypting it if necessary.
      *
      * @param segment The segment to process.
+     * @param segmentIndex The index of the segment in the playlist.
      * @return An InputStream containing the processed (decrypted if needed) segment data.
      * @throws IOException If fetching or decryption fails.
      */
-    private InputStream processSegment(HlsParser.Segment segment) throws IOException {
+    private InputStream processSegment(HlsParser.Segment segment, int segmentIndex) throws IOException {
         if (isCancelled.get() || cancellationRequested.get() || Thread.interrupted()) {
             throw new InterruptedIOException("Download cancelled");
         }
@@ -272,7 +298,11 @@ public class HlsMediaProcessor {
             if (key == null) {
                 throw new IllegalStateException("Key should be pre-fetched for encryption info: " + segment.getEncryptionInfo().getUri());
             }
-            return decryptor.decrypt(segmentStream, key, segment.getEncryptionInfo());
+            try {
+                return decryptor.decrypt(segmentStream, key, segment.getEncryptionInfo(), segmentIndex);
+            } catch (GeneralSecurityException e) {
+                throw new IOException(String.format(ERROR_DECRYPTION_FAILED, e.getMessage()), e);
+            }
         }
         return segmentStream;
     }
@@ -363,6 +393,7 @@ public class HlsMediaProcessor {
         @Override
         public void cleanupState() throws IOException {
             Files.deleteIfExists(Paths.get(stateFile));
+            System.out.println("State file cleaned up: " + stateFile);
         }
     }
 
@@ -401,16 +432,63 @@ public class HlsMediaProcessor {
      * Interface for decrypting segments.
      */
     public interface Decryptor {
-        InputStream decrypt(InputStream encryptedStream, byte[] key, HlsParser.EncryptionInfo encryptionInfo) throws IOException;
+        InputStream decrypt(InputStream encryptedStream, byte[] key, HlsParser.EncryptionInfo encryptionInfo, int segmentIndex) throws IOException, GeneralSecurityException;
     }
 
     /**
-     * Default implementation of Decryptor (no-op decryption for unencrypted segments).
+     * Default implementation of Decryptor using AES-128-CBC.
      */
     private static class DefaultDecryptor implements Decryptor {
         @Override
-        public InputStream decrypt(InputStream encryptedStream, byte[] key, HlsParser.EncryptionInfo encryptionInfo) throws IOException {
-            return encryptedStream;
+        public InputStream decrypt(InputStream encryptedStream, byte[] key, HlsParser.EncryptionInfo encryptionInfo, int segmentIndex) throws IOException, GeneralSecurityException {
+            // Initialize AES-128-CBC cipher
+            Cipher cipher = Cipher.getInstance("AES/CBC/NoPadding");
+            byte[] iv = parseIv(encryptionInfo.getIv(), segmentIndex);
+            SecretKeySpec keySpec = new SecretKeySpec(key, "AES");
+            IvParameterSpec ivSpec = new IvParameterSpec(iv);
+
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
+
+            // Read encrypted data and decrypt
+            ByteArrayOutputStream decryptedOutput = new ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int bytesRead;
+            while ((bytesRead = encryptedStream.read(buffer)) != -1) {
+                byte[] decryptedBlock = cipher.update(buffer, 0, bytesRead);
+                if (decryptedBlock != null) {
+                    decryptedOutput.write(decryptedBlock);
+                }
+            }
+            byte[] finalBlock = cipher.doFinal();
+            if (finalBlock != null) {
+                decryptedOutput.write(finalBlock);
+            }
+
+            return new ByteArrayInputStream(decryptedOutput.toByteArray());
+        }
+
+        private byte[] parseIv(String ivStr, int segmentIndex) {
+            if (ivStr == null || ivStr.isEmpty()) {
+                // Default IV to segment sequence number (HLS spec)
+                byte[] iv = new byte[16];
+                Arrays.fill(iv, (byte) 0);
+                iv[15] = (byte) (segmentIndex & 0xFF);
+                return iv;
+            }
+            // Parse hex string (e.g., "0xabcdef")
+            if (ivStr.startsWith("0x")) {
+                ivStr = ivStr.substring(2);
+            }
+            // Ensure the hex string is 32 chars long (16 bytes)
+            if (ivStr.length() != 32) {
+                throw new IllegalArgumentException("IV hex string must represent 16 bytes, got " + ivStr.length() / 2 + " bytes");
+            }
+            byte[] iv = new byte[16];
+            for (int i = 0; i < 16; i++) {
+                String byteStr = ivStr.substring(i * 2, i * 2 + 2);
+                iv[i] = (byte) Integer.parseInt(byteStr, 16);
+            }
+            return iv;
         }
     }
 
