@@ -119,8 +119,6 @@ class HlsMediaProcessorTest {
         AtomicReference<HlsMediaProcessor.DownloadState> lastState = new AtomicReference<>();
         AtomicReference<String> lastMessage = new AtomicReference<>();
 
-        initHls(TWO_SEGMENT_PLAYLIST);
-
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
                 new MockFetcher(TWO_SEGMENT_PLAYLIST, true), // Enable delay for second segment
                 new MockDecryptor(),
@@ -181,7 +179,7 @@ class HlsMediaProcessorTest {
     @Test
     void testDecryptWithKeyChange() throws IOException {
         AtomicInteger keyFetchCount = new AtomicInteger(0);
-        MockFetcher fetcher = new MockFetcher(DEFAULT_PLAYLIST, true) {
+        MockFetcher fetcher = new MockFetcher(DEFAULT_PLAYLIST, false) {
             @Override
             public InputStream fetchContent(URI uri) throws IOException {
                 if (uri != null && uri.toString().contains("key")) {
@@ -222,24 +220,53 @@ class HlsMediaProcessorTest {
             fail("Failed to create initial segment file: " + e.getMessage());
         }
 
+        CountDownLatch cancelLatch = new CountDownLatch(1);
+        AtomicInteger segmentCounter = new AtomicInteger(0);
+
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new MockFetcher(TWO_SEGMENT_PLAYLIST, true),
+                new MockFetcher(TWO_SEGMENT_PLAYLIST, true), // Enable delay for second segment
                 new MockDecryptor(),
-                2,
+                2, // Use 2 threads to simulate concurrency
                 new FileSegmentStateManager(stateFile),
-                null,
-                (progress, total) -> {},
+                null, // Use default SegmentCombiner
+                (progress, total) -> {
+                    int count = segmentCounter.incrementAndGet();
+                    if (count == 1) {
+                        assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")), "First segment should exist");
+                        assertFalse(Files.exists(Path.of(outputDir + "/segment_2.ts")), "Second segment should not exist yet");
+                        cancelLatch.countDown(); // Signal test to cancel
+                    }
+                },
                 (state, message) -> {});
+        // Start a separate thread to simulate external cancellation
+        Thread cancelThread = new Thread(() -> {
+            try {
+                assertTrue(cancelLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
+                downloader.cancel(); // Cancel from a different thread
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        cancelThread.start();
 
         Thread downloadThread = new Thread(() -> {
             try {
                 downloader.download(URI.create("http://test/media.m3u8"));
             } catch (IOException e) {
-                fail("Unexpected IOException: " + e.getMessage());
+                // Ignore expected InterruptedIOException due to cancellation
+                if (!e.getMessage().contains("Download cancelled")) {
+                    fail("Unexpected IOException: " + e.getMessage());
+                }
             }
         });
         downloadThread.start();
-        downloadThread.join(5000); // Allow download to complete
+
+        // Wait for the first segment to complete, then cancel
+        assertTrue(cancelLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
+        cancelThread.join(1000); // Ensure cancel thread finishes
+        downloadThread.join(2000); // Allow cancellation to complete
+
+        // all the stuff above only to have segment_1.ts still available
 
         // Verify the segment file was overwritten with new content
         try (InputStream is = new FileInputStream(segmentFile)) {
