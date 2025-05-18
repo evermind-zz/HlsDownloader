@@ -212,7 +212,7 @@ public class HlsMediaProcessor {
                         }
                     } catch (IOException e) {
                         System.err.println("HLSIOException in thread: " + Thread.currentThread().getName() + ", " + e.getMessage());
-                        throw e;
+                        throw new RuntimeException("Failed to process segment " + (index + 1), e);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt(); // Restore interrupted status
                     }
@@ -248,9 +248,10 @@ public class HlsMediaProcessor {
             if (e.getCause() instanceof InterruptedIOException) {
                 segmentStateManager.cleanupState();
                 updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
-            } else if (e.getCause() instanceof IOException) {
-                updateState(DownloadState.ERROR, e.getCause().getMessage());
-                throw (IOException) e.getCause();
+            } else if (e.getCause() instanceof RuntimeException && e.getCause().getCause() instanceof IOException) {
+                IOException ioException = (IOException) e.getCause().getCause();
+                updateState(DownloadState.ERROR, ioException.getMessage());
+                throw ioException;
             } else if (e.getCause() instanceof InterruptedException) {
                 segmentStateManager.cleanupState();
                 updateState(DownloadState.CANCELLED, MESSAGE_INTERRUPTED);
