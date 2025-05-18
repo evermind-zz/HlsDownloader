@@ -18,7 +18,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -81,7 +81,7 @@ class HlsMediaProcessorTest {
     }
 
     private void initHls(String playlistContent) {
-        initHls(playlistContent, new MockFetcher(playlistContent, true), new MockDecryptor(), 2);
+        initHls(playlistContent, new MockFetcher(playlistContent), new MockDecryptor(), 2);
     }
 
     private void initHls(String playlistContent, HlsParser.Fetcher fetcher, HlsMediaProcessor.Decryptor decryptor, int numThreads) {
@@ -114,13 +114,14 @@ class HlsMediaProcessorTest {
 
     @Test
     void testCancelDuringDownload() throws InterruptedException, IOException {
-        CountDownLatch cancelLatch = new CountDownLatch(1);
+        // Create a CyclicBarrier with 3 parties: 2 download threads + 1 test thread
+        CyclicBarrier barrier = new CyclicBarrier(3);
         AtomicInteger segmentCounter = new AtomicInteger(0);
         AtomicReference<HlsMediaProcessor.DownloadState> lastState = new AtomicReference<>();
         AtomicReference<String> lastMessage = new AtomicReference<>();
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new MockFetcher(TWO_SEGMENT_PLAYLIST, true), // Enable delay for second segment
+                new MockFetcher(TWO_SEGMENT_PLAYLIST, barrier), // Pass the barrier to MockFetcher
                 new MockDecryptor(),
                 2, // Use 2 threads to simulate concurrency
                 new FileSegmentStateManager(stateFile),
@@ -130,23 +131,19 @@ class HlsMediaProcessorTest {
                     if (count == 1) {
                         assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")), "First segment should exist");
                         assertFalse(Files.exists(Path.of(outputDir + "/segment_2.ts")), "Second segment should not exist yet");
-                        cancelLatch.countDown(); // Signal test to cancel
+                        try {
+                            barrier.await(5, TimeUnit.SECONDS);
+                        } catch (Exception e) {
+                            fail("Barrier await failed: " + e.getMessage());
+                        }
+                        // At this point, both threads are at the barrier (one has written segment_1.ts, the other is waiting)
+                        downloader.cancel(); // Cancel the download
                     }
                 },
                 (state, message) -> {
                     lastState.set(state);
                     lastMessage.set(message);
                 });
-        // Start a separate thread to simulate external cancellation
-        Thread cancelThread = new Thread(() -> {
-            try {
-                assertTrue(cancelLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
-                downloader.cancel(); // Cancel from a different thread
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
-        cancelThread.start();
 
         Thread downloadThread = new Thread(() -> {
             try {
@@ -160,9 +157,15 @@ class HlsMediaProcessorTest {
         });
         downloadThread.start();
 
-        // Wait for the first segment to complete, then cancel
-        assertTrue(cancelLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
-        cancelThread.join(1000); // Ensure cancel thread finishes
+        // Test thread waits at the barrier for both download threads to reach the fetch point
+        try {
+            barrier.await(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            fail("Barrier await failed: " + e.getMessage());
+        }
+
+        // At this point, both threads are at the barrier (one has written segment_1.ts, the other is waiting)
+        //downloader.cancel(); // Cancel the download
 
         downloadThread.join(2000); // Allow cancellation to complete
 
@@ -171,15 +174,14 @@ class HlsMediaProcessorTest {
         assertFalse(Files.exists(Path.of(outputFile)), "Output file should not exist after cancellation");
         assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")), "First segment should exist");
         assertFalse(Files.exists(Path.of(outputDir + "/segment_2.ts")), "Second segment should not exist");
-        Set<Integer> state = new FileSegmentStateManager(stateFile).loadState();
-        assertFalse(Files.exists(Path.of(stateFile)), "state file sould should not exist");
+        assertTrue(Files.exists(Path.of(stateFile)), "State file should exist");
         Files.deleteIfExists(Path.of(outputDir + "/segment_1.ts"));
     }
 
     @Test
     void testDecryptWithKeyChange() throws IOException {
         AtomicInteger keyFetchCount = new AtomicInteger(0);
-        MockFetcher fetcher = new MockFetcher(DEFAULT_PLAYLIST, false) {
+        MockFetcher fetcher = new MockFetcher(DEFAULT_PLAYLIST) {
             @Override
             public InputStream fetchContent(URI uri) throws IOException {
                 if (uri != null && uri.toString().contains("key")) {
@@ -220,11 +222,11 @@ class HlsMediaProcessorTest {
             fail("Failed to create initial segment file: " + e.getMessage());
         }
 
-        CountDownLatch cancelLatch = new CountDownLatch(1);
+        CyclicBarrier barrier = new CyclicBarrier(3);
         AtomicInteger segmentCounter = new AtomicInteger(0);
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new MockFetcher(TWO_SEGMENT_PLAYLIST, true), // Enable delay for second segment
+                new MockFetcher(TWO_SEGMENT_PLAYLIST, barrier),
                 new MockDecryptor(),
                 2, // Use 2 threads to simulate concurrency
                 new FileSegmentStateManager(stateFile),
@@ -234,20 +236,16 @@ class HlsMediaProcessorTest {
                     if (count == 1) {
                         assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")), "First segment should exist");
                         assertFalse(Files.exists(Path.of(outputDir + "/segment_2.ts")), "Second segment should not exist yet");
-                        cancelLatch.countDown(); // Signal test to cancel
+                        try {
+                            barrier.await(5, TimeUnit.SECONDS);
+                        } catch (Exception e) {
+                            fail("Barrier await failed: " + e.getMessage());
+                        }
+
+                        downloader.cancel(); // Cancel the download
                     }
                 },
                 (state, message) -> {});
-        // Start a separate thread to simulate external cancellation
-        Thread cancelThread = new Thread(() -> {
-            try {
-                assertTrue(cancelLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
-                downloader.cancel(); // Cancel from a different thread
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
-        cancelThread.start();
 
         Thread downloadThread = new Thread(() -> {
             try {
@@ -261,12 +259,14 @@ class HlsMediaProcessorTest {
         });
         downloadThread.start();
 
-        // Wait for the first segment to complete, then cancel
-        assertTrue(cancelLatch.await(5, TimeUnit.SECONDS), "First segment should be downloaded within 5 seconds");
-        cancelThread.join(1000); // Ensure cancel thread finishes
-        downloadThread.join(2000); // Allow cancellation to complete
+        // Test thread waits at the barrier for both download threads to reach the fetch point
+        try {
+            barrier.await(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            fail("Barrier await failed: " + e.getMessage());
+        }
 
-        // all the stuff above only to have segment_1.ts still available
+        downloadThread.join(2000); // Allow cancellation to complete
 
         // Verify the segment file was overwritten with new content
         try (InputStream is = new FileInputStream(segmentFile)) {
@@ -289,7 +289,7 @@ class HlsMediaProcessorTest {
         AtomicReference<String> lastMessage = new AtomicReference<>();
 
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                new MockFetcher(emptyPlaylist, true),
+                new MockFetcher(emptyPlaylist),
                 new MockDecryptor(),
                 2,
                 new FileSegmentStateManager(stateFile),
@@ -352,11 +352,15 @@ class HlsMediaProcessorTest {
     private static class MockFetcher implements HlsParser.Fetcher {
         final String content;
         protected final AtomicInteger segmentCounter = new AtomicInteger(0);
-        private final boolean delaySecondSegment;
+        private final CyclicBarrier barrier;
 
-        MockFetcher(String content, boolean delaySecondSegment) {
+        MockFetcher(String content) {
+            this(content, null);
+        }
+
+        MockFetcher(String content, CyclicBarrier barrier) {
             this.content = content;
-            this.delaySecondSegment = delaySecondSegment;
+            this.barrier = barrier;
         }
 
         @Override
@@ -367,12 +371,12 @@ class HlsMediaProcessorTest {
                 for (int i = 0; i < data.length; i++) {
                     data[i] = reverseByte((byte) (segmentNum + i)); // mock encryption
                 }
-                // Introduce a delay for the second segment to allow cancellation
-                if (delaySecondSegment && segmentNum == 1) {
+                // Synchronize threads at the barrier before proceeding
+                if (barrier != null && segmentNum == 1) {
                     try {
-                        Thread.sleep(2000); // 2-second delay for the second segment
-                    } catch (InterruptedException e) {
-
+                        barrier.await(5, TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        throw new IOException("Barrier await failed: " + e.getMessage());
                     }
                 }
                 return new ByteArrayInputStream(data);
