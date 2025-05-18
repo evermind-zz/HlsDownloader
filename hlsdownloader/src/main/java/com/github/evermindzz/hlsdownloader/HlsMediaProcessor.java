@@ -110,14 +110,15 @@ public class HlsMediaProcessor {
         if (playlist == null) {
             try {
                 playlist = parser.parse(uri);
-                if (playlist.getSegments().isEmpty()) {
-                    updateState(DownloadState.ERROR, ERROR_NO_SEGMENTS);
-                    throw new IOException(ERROR_NO_SEGMENTS);
-                }
             } catch (IOException e) {
                 String message = String.format(ERROR_PARSING_PLAYLIST, e.getMessage());
                 updateState(DownloadState.ERROR, message);
                 throw e;
+            }
+
+            if (playlist.getSegments().isEmpty()) {
+                updateState(DownloadState.ERROR, ERROR_NO_SEGMENTS);
+                throw new IOException(ERROR_NO_SEGMENTS);
             }
         }
 
@@ -173,13 +174,15 @@ public class HlsMediaProcessor {
                             pauseLatch.await(1, TimeUnit.SECONDS); // Periodic check with timeout
                             if (Thread.interrupted()) return;
                         }
-                        // Check cancellation
+                        // Check cancellation before starting work
                         if (isCancelled.get() || cancellationRequested.get() || Thread.interrupted()) {
                             return;
                         }
                         String segmentFile = outputDir + "/segment_" + (index + 1) + ".ts";
                         try (InputStream in = processSegment(segment)) {
-                            if (Thread.interrupted()) throw new InterruptedIOException();
+                            if (Thread.interrupted() || isCancelled.get() || cancellationRequested.get()) {
+                                throw new InterruptedIOException("Download cancelled during I/O");
+                            }
                             Files.copy(in, Paths.get(segmentFile), StandardCopyOption.REPLACE_EXISTING);
                         }
                         completedSet.add(index);
@@ -188,6 +191,10 @@ public class HlsMediaProcessor {
                         }
                         int currentProgress = progress.incrementAndGet();
                         progressCallback.onProgressUpdate(currentProgress, segments.size());
+                        // Check cancellation again after progress update
+                        if (isCancelled.get() || cancellationRequested.get()) {
+                            throw new InterruptedIOException("Download cancelled after progress");
+                        }
                     } catch (IOException e) {
                         // Log or handle IOException if needed
                     } catch (InterruptedException e) {
@@ -256,7 +263,10 @@ public class HlsMediaProcessor {
             throw new InterruptedIOException("Download cancelled");
         }
         InputStream segmentStream = fetcher.fetchContent(segment.getUri());
-        if (Thread.interrupted()) throw new InterruptedIOException();
+        if (Thread.interrupted() || isCancelled.get() || cancellationRequested.get()) {
+            segmentStream.close();
+            throw new InterruptedIOException("Download cancelled during fetch");
+        }
         if (segment.getEncryptionInfo() != null) {
             byte[] key = segment.getEncryptionInfo().getKey();
             if (key == null) {
