@@ -60,10 +60,10 @@ class HlsParserTest {
     @Test
     void testMediaPlaylistParsingValidation() throws Exception {
         String mediaContent = "#EXTM3U\n" +
-                "#EXT-X-TARGETDURATION:8\n" +
+                "#EXT-X-TARGETDURATION:10\n" +
                 "#EXTINF:9.0,\n" +
                 "segment1.ts\n" +
-                "#EXTINF:7.5,\n" +
+                "#EXTINF:10.0,\n" +
                 "segment2.ts\n" +
                 "#EXT-X-ENDLIST";
 
@@ -75,7 +75,12 @@ class HlsParserTest {
         }, new MockFetcher(mediaContent),
                 true);
 
-        parser.parse(dummyUri); // Should log warning due to duration > target
+        HlsParser.MediaPlaylist result = parser.parse(dummyUri); // Should not throw in strict mode
+        assertNotNull(result);
+        assertEquals(2, result.getSegments().size());
+        assertEquals(10.0, result.getTargetDuration());
+        assertEquals(9.0, result.getSegments().get(0).getDuration());
+        assertEquals(10.0, result.getSegments().get(1).getDuration());
     }
 
     @Test
