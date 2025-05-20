@@ -146,6 +146,8 @@ public class HlsParser {
                     playlist.addSegment(currentSegment);
                 }
                 currentSegment = null; // Reset for discontinuity
+                currentEncryption = null; // Reset encryption state
+                currentByteRange = null; // Reset byte range state
             } else if (line.startsWith("#EXT-X-PROGRAM-DATE-TIME")) {
                 if (currentSegment != null) {
                     currentSegment.programDateTime = line.split(":")[1];
