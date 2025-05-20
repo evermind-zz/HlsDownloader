@@ -81,13 +81,14 @@ class HlsParserTest {
     @Test
     void testEncryptedMediaPlaylistParsing() throws Exception {
         String playlistContent = "#EXTM3U\n" +
+                "#EXT-X-VERSION:2\n" +
                 "#EXT-X-TARGETDURATION:10\n" +
-                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0xabcdef\n" +
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0xabcdef1234567890\n" +
                 "#EXTINF:9.0,\n" +
                 "segment1.ts\n" +
                 "#EXTINF:9.0,\n" +
                 "segment2.ts\n" +
-                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0x123456\n" +
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0x1234567890abcdef\n" +
                 "#EXTINF:9.0,\n" +
                 "segment3.ts\n" +
                 "#EXT-X-ENDLIST";
@@ -112,7 +113,7 @@ class HlsParserTest {
         assertNotNull(encryptionInfo);
         assertEquals("AES-128", encryptionInfo.getMethod());
         assertEquals(URI.create("https://example.com/key.key"), encryptionInfo.getUri());
-        assertEquals("0xabcdef", encryptionInfo.getIv());
+        assertEquals("0xabcdef1234567890", encryptionInfo.getIv());
         assertNull(encryptionInfo.getKey(), "Key should be null before pre-fetching");
 
         // Simulate pre-fetching key for testing
@@ -131,15 +132,16 @@ class HlsParserTest {
         assertNotNull(encryptionInfo);
         assertEquals("AES-128", encryptionInfo.getMethod());
         assertEquals(URI.create("https://example.com/key.key"), encryptionInfo.getUri());
-        assertEquals("0x123456", encryptionInfo.getIv());
+        assertEquals("0x1234567890abcdef", encryptionInfo.getIv());
         assertNull(encryptionInfo.getKey(), "Key should be null for new encryption info");
     }
 
     @Test
     void testEncryptedPlaylistParsing() throws IOException {
         String playlist = "#EXTM3U\n" +
+                "#EXT-X-VERSION:2\n" +
                 "#EXT-X-TARGETDURATION:10\n" +
-                "#EXT-X-KEY:METHOD=AES-128,URI=\"key.key\",IV=0xabcdef\n" +
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"key.key\",IV=0xabcdef1234567890\n" +
                 "#EXTINF:9.0,\n" +
                 "segment1.ts\n" +
                 "#EXTINF:9.0,\n" +
@@ -158,7 +160,7 @@ class HlsParserTest {
         assertNotNull(encryptionInfo);
         assertEquals("AES-128", encryptionInfo.getMethod());
         assertEquals("http://test/key.key", encryptionInfo.getUri().toString());
-        assertEquals("0xabcdef", encryptionInfo.getIv());
+        assertEquals("0xabcdef1234567890", encryptionInfo.getIv());
         assertNull(encryptionInfo.getKey(), "Key should be null before pre-fetching");
     }
 
@@ -175,7 +177,7 @@ class HlsParserTest {
         HlsParser parser = new HlsParser(new DummyCallback(), new MockFetcher(invalidPlaylist), true);
 
         IOException ex = assertThrows(IOException.class, () -> parser.parse(baseUri));
-        assertTrue(ex.getMessage().contains("Unsupported or unknown tag"));
+        assertTrue(ex.getMessage().contains("Unsupported media playlist tag: #EXT-UNKNOWN-TAG:foobar"));
     }
 
     @Test
@@ -248,6 +250,58 @@ class HlsParserTest {
 
         IOException ex = assertThrows(IOException.class, () -> parser.parse(baseUri));
         assertTrue(ex.getMessage().contains("Invalid playlist: Missing #EXTM3U"));
+    }
+
+    @Test
+    void testAdvancedMediaPlaylistParsing() throws IOException {
+        String playlist = "#EXTM3U\n" +
+                "#EXT-X-VERSION:7\n" +
+                "#EXT-X-TARGETDURATION:10\n" +
+                "#EXT-X-MEDIA-SEQUENCE:0\n" +
+                "#EXT-X-PLAYLIST-TYPE:VOD\n" +
+                "#EXT-X-INDEPENDENT-SEGMENTS\n" +
+                "#EXT-X-MAP:URI=\"init.mp4\"\n" +
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"key.key\",IV=0xabcdef1234567890\n" +
+                "#EXTINF:9.0,\n" +
+                "segment1.ts\n" +
+                "#EXT-X-DISCONTINUITY\n" +
+                "#EXTINF:10.0,\n" +
+                "segment2.ts\n" +
+                "#EXT-X-PROGRAM-DATE-TIME:2025-05-20T22:00:00Z\n" +
+                "#EXTINF:9.0,\n" +
+                "segment3.ts\n" +
+                "#EXT-X-ENDLIST";
+
+        URI baseUri = URI.create("http://test/");
+
+        HlsParser parser = new HlsParser(new DummyCallback(), new MockFetcher(playlist), true);
+        HlsParser.MediaPlaylist result = parser.parse(baseUri);
+
+        assertNotNull(result);
+        assertEquals(3, result.getSegments().size());
+        assertEquals(7, parser.extractVersion(playlist)); // Verify version
+        assertEquals(10.0, result.getTargetDuration());
+        assertEquals(0, result.getMediaSequence());
+        assertEquals("VOD", result.getPlaylistType());
+        assertTrue(result.isEndList());
+        assertTrue(result.isIndependentSegments());
+        assertNotNull(result.getMap());
+        assertEquals(URI.create("http://test/init.mp4"), result.getMap().getUri());
+
+        HlsParser.Segment segment1 = result.getSegments().get(0);
+        assertEquals(9.0, segment1.getDuration());
+        assertNotNull(segment1.getEncryptionInfo());
+        assertEquals("AES-128", segment1.getEncryptionInfo().getMethod());
+        assertEquals("http://test/key.key", segment1.getEncryptionInfo().getUri().toString());
+        assertEquals("0xabcdef1234567890", segment1.getEncryptionInfo().getIv());
+
+        HlsParser.Segment segment2 = result.getSegments().get(1);
+        assertEquals(10.0, segment2.getDuration());
+        assertNull(segment2.getEncryptionInfo()); // Discontinuity resets encryption
+
+        HlsParser.Segment segment3 = result.getSegments().get(2);
+        assertEquals(9.0, segment3.getDuration());
+        assertEquals("2025-05-20T22:00:00Z", segment3.getProgramDateTime());
     }
 
     static class MockFetcher implements HlsParser.Fetcher {
