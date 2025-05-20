@@ -67,7 +67,7 @@ public class HlsParser {
         return result.toString("UTF-8");
     }
 
-    private int extractVersion(String content) {
+    public int extractVersion(String content) {
         Pattern versionPattern = Pattern.compile("#EXT-X-VERSION:(\\d+)");
         Matcher matcher = versionPattern.matcher(content);
         return matcher.find() ? Integer.parseInt(matcher.group(1)) : 1; // Default to version 1 if not specified
@@ -115,6 +115,7 @@ public class HlsParser {
         Segment currentSegment = null;
         EncryptionInfo currentEncryption = null;
         Map<String, String> currentByteRange = null;
+        String pendingProgramDateTime = null; // Store pending date-time for the next segment
 
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i].trim();
@@ -149,9 +150,7 @@ public class HlsParser {
                 currentEncryption = null; // Reset encryption state
                 currentByteRange = null; // Reset byte range state
             } else if (line.startsWith("#EXT-X-PROGRAM-DATE-TIME")) {
-                if (currentSegment != null) {
-                    currentSegment.programDateTime = line.split(":")[1];
-                }
+                pendingProgramDateTime = line.split(":", 2)[1]; // Store for the next segment
             } else if (line.startsWith("#EXT-X-MAP")) {
                 Map<String, String> attrs = parseAttributes(line);
                 URI mapUri = baseUri.resolve(attrs.get("URI").replace("\"", ""));
@@ -176,7 +175,7 @@ public class HlsParser {
                 }
                 currentEncryption = new EncryptionInfo(method, keyUri, iv);
             } else if (line.startsWith("#EXTINF")) {
-                String[] parts = line.split(":")[1].split(",");
+                String[] parts = line.split(":", 2)[1].split(",");
                 double duration = Double.parseDouble(parts[0]);
                 String title = parts.length > 1 ? parts[1] : "";
                 if (currentSegment != null) {
@@ -184,6 +183,10 @@ public class HlsParser {
                 }
                 currentSegment = new Segment(null, duration, title, currentEncryption);
                 currentSegment.byteRange = currentByteRange;
+                if (pendingProgramDateTime != null) {
+                    currentSegment.programDateTime = pendingProgramDateTime;
+                    pendingProgramDateTime = null; // Reset after applying
+                }
             } else if (line.startsWith("#EXT-X-PART") || line.startsWith("#EXT-X-PRELOAD-HINT")) {
                 // Partial support for low-latency HLS, log as warning
                 System.err.println("Warning: Low-latency tag " + line + " encountered but not fully supported");
