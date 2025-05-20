@@ -88,12 +88,12 @@ class HlsParserTest {
         String playlistContent = "#EXTM3U\n" +
                 "#EXT-X-VERSION:2\n" +
                 "#EXT-X-TARGETDURATION:10\n" +
-                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0xabcdef1234567890\n" +
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0xabcdef1234567890abcdef1234567890\n" +
                 "#EXTINF:9.0,\n" +
                 "segment1.ts\n" +
                 "#EXTINF:9.0,\n" +
                 "segment2.ts\n" +
-                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0x1234567890abcdef\n" +
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key.key\",IV=0x1234567890abcdef1234567890abcdef\n" +
                 "#EXTINF:9.0,\n" +
                 "segment3.ts\n" +
                 "#EXT-X-ENDLIST";
@@ -118,7 +118,7 @@ class HlsParserTest {
         assertNotNull(encryptionInfo);
         assertEquals("AES-128", encryptionInfo.getMethod());
         assertEquals(URI.create("https://example.com/key.key"), encryptionInfo.getUri());
-        assertEquals("0xabcdef1234567890", encryptionInfo.getIv());
+        assertEquals("0xabcdef1234567890abcdef1234567890", encryptionInfo.getIv());
         assertNull(encryptionInfo.getKey(), "Key should be null before pre-fetching");
 
         // Simulate pre-fetching key for testing
@@ -137,7 +137,7 @@ class HlsParserTest {
         assertNotNull(encryptionInfo);
         assertEquals("AES-128", encryptionInfo.getMethod());
         assertEquals(URI.create("https://example.com/key.key"), encryptionInfo.getUri());
-        assertEquals("0x1234567890abcdef", encryptionInfo.getIv());
+        assertEquals("0x1234567890abcdef1234567890abcdef", encryptionInfo.getIv());
         assertNull(encryptionInfo.getKey(), "Key should be null for new encryption info");
     }
 
@@ -146,7 +146,7 @@ class HlsParserTest {
         String playlist = "#EXTM3U\n" +
                 "#EXT-X-VERSION:2\n" +
                 "#EXT-X-TARGETDURATION:10\n" +
-                "#EXT-X-KEY:METHOD=AES-128,URI=\"key.key\",IV=0xabcdef1234567890\n" +
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"key.key\",IV=0xabcdef1234567890abcdef1234567890\n" +
                 "#EXTINF:9.0,\n" +
                 "segment1.ts\n" +
                 "#EXTINF:9.0,\n" +
@@ -165,7 +165,7 @@ class HlsParserTest {
         assertNotNull(encryptionInfo);
         assertEquals("AES-128", encryptionInfo.getMethod());
         assertEquals("http://test/key.key", encryptionInfo.getUri().toString());
-        assertEquals("0xabcdef1234567890", encryptionInfo.getIv());
+        assertEquals("0xabcdef1234567890abcdef1234567890", encryptionInfo.getIv());
         assertNull(encryptionInfo.getKey(), "Key should be null before pre-fetching");
     }
 
@@ -266,7 +266,7 @@ class HlsParserTest {
                 "#EXT-X-PLAYLIST-TYPE:VOD\n" +
                 "#EXT-X-INDEPENDENT-SEGMENTS\n" +
                 "#EXT-X-MAP:URI=\"init.mp4\"\n" +
-                "#EXT-X-KEY:METHOD=AES-128,URI=\"key.key\",IV=0xabcdef1234567890\n" +
+                "#EXT-X-KEY:METHOD=AES-128,URI=\"key.key\",IV=0xabcdef1234567890abcdef1234567890\n" +
                 "#EXTINF:9.0,\n" +
                 "segment1.ts\n" +
                 "#EXT-X-DISCONTINUITY\n" +
@@ -298,7 +298,7 @@ class HlsParserTest {
         assertNotNull(segment1.getEncryptionInfo());
         assertEquals("AES-128", segment1.getEncryptionInfo().getMethod());
         assertEquals("http://test/key.key", segment1.getEncryptionInfo().getUri().toString());
-        assertEquals("0xabcdef1234567890", segment1.getEncryptionInfo().getIv());
+        assertEquals("0xabcdef1234567890abcdef1234567890", segment1.getEncryptionInfo().getIv());
 
         HlsParser.Segment segment2 = result.getSegments().get(1);
         assertEquals(10.0, segment2.getDuration());
