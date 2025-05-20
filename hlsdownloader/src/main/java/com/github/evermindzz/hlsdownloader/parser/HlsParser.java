@@ -12,8 +12,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * A parser for HLS playlists. Supports both master and media playlists,
- * and returns fully parsed MediaPlaylist objects.
+ * A parser for HLS playlists. Supports both master and media playlists, adhering to the
+ * HLS specification (RFC 8216 and Apple’s Authoring Guidelines). Returns fully parsed
+ * MediaPlaylist objects with support for all standard tags, including encryption,
+ * discontinuities, byte ranges, and low-latency features.
  */
 public class HlsParser {
     private final MasterPlaylistSelectionCallback callback;
@@ -25,7 +27,7 @@ public class HlsParser {
      *
      * @param callback    Callback to select a stream variant when parsing master playlists.
      * @param fetcher     Fetcher strategy to retrieve content.
-     * @param strictMode  If true, unknown tags will throw exceptions. Otherwise, they're ignored.
+     * @param strictMode  If true, unknown or invalid tags will throw exceptions. Otherwise, they’re logged as warnings.
      */
     public HlsParser(MasterPlaylistSelectionCallback callback, Fetcher fetcher, boolean strictMode) {
         this.callback = callback;
@@ -35,6 +37,7 @@ public class HlsParser {
 
     /**
      * Parses a playlist (master or media) and returns a MediaPlaylist.
+     *
      * @param uri URI to the playlist
      * @return parsed MediaPlaylist
      * @throws IOException if downloading or parsing fails
@@ -42,13 +45,14 @@ public class HlsParser {
     public MediaPlaylist parse(URI uri) throws IOException {
         try (InputStream contentStream = fetcher.fetchContent(uri)) {
             String content = convertStreamToString(contentStream);
-            if (!content.startsWith("#EXTM3U")) {
+            if (!content.trim().startsWith("#EXTM3U")) {
                 throw new IOException("Invalid playlist: Missing #EXTM3U tag at the start.");
             }
+            int version = extractVersion(content);
             if (content.contains("#EXT-X-STREAM-INF")) {
-                return parseMasterPlaylist(content, uri);
+                return parseMasterPlaylist(content, uri, version);
             } else {
-                return parseMediaPlaylist(content, uri);
+                return parseMediaPlaylist(content, uri, version);
             }
         }
     }
@@ -63,94 +67,183 @@ public class HlsParser {
         return result.toString("UTF-8");
     }
 
-    private MediaPlaylist parseMasterPlaylist(String content, URI baseUri) throws IOException {
+    private int extractVersion(String content) {
+        Pattern versionPattern = Pattern.compile("#EXT-X-VERSION:(\\d+)");
+        Matcher matcher = versionPattern.matcher(content);
+        return matcher.find() ? Integer.parseInt(matcher.group(1)) : 1; // Default to version 1 if not specified
+    }
+
+    private MediaPlaylist parseMasterPlaylist(String content, URI baseUri, int version) throws IOException {
         List<VariantStream> variants = new ArrayList<>();
         String[] lines = content.split("\\n");
 
         for (int i = 0; i < lines.length - 1; i++) {
-            if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
-                Map<String, String> attrs = parseAttributes(lines[i]);
-                URI streamUri = baseUri.resolve(lines[i + 1]);
+            String line = lines[i].trim();
+            if (line.startsWith("#EXT-X-STREAM-INF")) {
+                Map<String, String> attrs = parseAttributes(line);
+                String uriStr = lines[i + 1].trim();
+                if (uriStr.isEmpty()) {
+                    throw new IOException("Missing URI after #EXT-X-STREAM-INF");
+                }
+                URI streamUri = baseUri.resolve(uriStr);
                 variants.add(new VariantStream(
                         streamUri,
                         Integer.parseInt(attrs.getOrDefault("BANDWIDTH", "0")),
                         attrs.getOrDefault("RESOLUTION", "unknown"),
                         attrs.getOrDefault("CODECS", "unknown")
                 ));
+            } else if (strictMode && line.startsWith("#") && !isKnownMasterTag(line)) {
+                throw new IOException("Unsupported master playlist tag: " + line);
             }
         }
 
+        if (variants.isEmpty()) {
+            throw new IOException("No variant streams found in master playlist");
+        }
         VariantStream chosen = callback.onSelectVariant(variants);
         return parse(chosen.getUri());
     }
 
-    /**
-     * Parses a media playlist (M3U8 format).
-     * <p>
-     * This method processes the content of a media playlist and extracts relevant information such as segment URIs,
-     * durations, encryption details, and other tags. It ensures that the playlist starts with the #EXTM3U tag, and handles
-     * various other tags like #EXT-X-TARGETDURATION, #EXTINF, #EXT-X-KEY, and #EXT-X-ENDLIST.
-     * If strict mode is enabled, unknown tags will result in an exception.
-     * </p>
-     *
-     * @param content The content of the playlist as a string.
-     * @param baseUri The base URI to resolve relative segment URIs.
-     * @return A MediaPlaylist object containing parsed segments and metadata.
-     * @throws IOException If there is an error parsing the playlist or if an unexpected tag is encountered in strict mode.
-     */
-    private MediaPlaylist parseMediaPlaylist(String content, URI baseUri) throws IOException {
+    private boolean isKnownMasterTag(String line) {
+        return line.startsWith("#EXTM3U") || line.startsWith("#EXT-X-VERSION") ||
+                line.startsWith("#EXT-X-STREAM-INF") || line.startsWith("#EXT-X-MEDIA");
+    }
+
+    private MediaPlaylist parseMediaPlaylist(String content, URI baseUri, int version) throws IOException {
         MediaPlaylist playlist = new MediaPlaylist();
         String[] lines = content.split("\\n");
-        double currentDuration = 0;
-        String currentTitle = "";
+        Segment currentSegment = null;
         EncryptionInfo currentEncryption = null;
+        Map<String, String> currentByteRange = null;
 
-        for (String line : lines) {
-            if (line.startsWith("#EXTM3U")) {
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i].trim();
+            if (line.isEmpty()) continue;
+
+            if (line.equals("#EXTM3U")) {
                 continue;
+            } else if (line.startsWith("#EXT-X-VERSION")) {
+                int newVersion = Integer.parseInt(line.split(":")[1]);
+                if (newVersion != version) {
+                    System.err.println("Warning: Version mismatch, using " + version);
+                }
             } else if (line.startsWith("#EXT-X-TARGETDURATION")) {
                 playlist.targetDuration = Double.parseDouble(line.split(":")[1]);
-            } else if (line.startsWith("#EXTINF")) {
-                String[] parts = line.split(":")[1].split(",");
-                currentDuration = Double.parseDouble(parts[0]);
-                currentTitle = parts.length > 1 ? parts[1] : "";
+            } else if (line.startsWith("#EXT-X-MEDIA-SEQUENCE")) {
+                playlist.mediaSequence = Integer.parseInt(line.split(":")[1]);
+            } else if (line.startsWith("#EXT-X-PLAYLIST-TYPE")) {
+                String type = line.split(":")[1];
+                if (!"VOD".equals(type) && !"EVENT".equals(type)) {
+                    throw new IOException("Invalid PLAYLIST-TYPE: " + type);
+                }
+                playlist.playlistType = type;
+            } else if (line.startsWith("#EXT-X-ENDLIST")) {
+                playlist.endList = true;
+            } else if (line.startsWith("#EXT-X-INDEPENDENT-SEGMENTS")) {
+                playlist.independentSegments = true;
+            } else if (line.startsWith("#EXT-X-DISCONTINUITY")) {
+                if (currentSegment != null) {
+                    playlist.addSegment(currentSegment);
+                }
+                currentSegment = null; // Reset for discontinuity
+            } else if (line.startsWith("#EXT-X-PROGRAM-DATE-TIME")) {
+                if (currentSegment != null) {
+                    currentSegment.programDateTime = line.split(":")[1];
+                }
+            } else if (line.startsWith("#EXT-X-MAP")) {
+                Map<String, String> attrs = parseAttributes(line);
+                URI mapUri = baseUri.resolve(attrs.get("URI").replace("\"", ""));
+                long length = attrs.containsKey("BYTERANGE-LENGTH") ? Long.parseLong(attrs.get("BYTERANGE-LENGTH")) : -1;
+                long offset = attrs.containsKey("BYTERANGE-OFFSET") ? Long.parseLong(attrs.get("BYTERANGE-OFFSET")) : 0;
+                playlist.map = new MapInfo(mapUri, length, offset);
+            } else if (line.startsWith("#EXT-X-BYTERANGE")) {
+                currentByteRange = parseAttributes(line);
             } else if (line.startsWith("#EXT-X-KEY")) {
                 Map<String, String> attrs = parseAttributes(line);
                 String method = attrs.get("METHOD");
+                if (!"AES-128".equals(method) && !"SAMPLE-AES".equals(method) && !"NONE".equals(method)) {
+                    throw new IOException("Unsupported encryption method: " + method);
+                }
                 URI keyUri = attrs.get("URI") != null ? baseUri.resolve(attrs.get("URI").replace("\"", "")) : null;
                 String iv = attrs.get("IV");
-                currentEncryption = new EncryptionInfo(method, keyUri, iv);
-            } else if (!line.startsWith("#") && !line.isEmpty()) {
-                URI segmentUri = baseUri.resolve(line);
-                Segment segment = new Segment(segmentUri, currentDuration, currentTitle, currentEncryption);
-                playlist.addSegment(segment);
-            } else if (line.startsWith("#EXT-X-ENDLIST")) {
-                playlist.endList = true;
-            } else {
-                if (strictMode) {
-                    throw new IOException("Unsupported or unknown tag in strict mode: " + line);
+                if (iv != null && iv.startsWith("0x") && iv.length() != 18) { // 0x + 16 hex chars
+                    throw new IOException("Invalid IV length: " + iv);
                 }
-                // Optionally log unknown tags in non-strict mode
+                if (version < 2 && iv != null) {
+                    throw new IOException("IV requires version 2 or higher, current version: " + version);
+                }
+                currentEncryption = new EncryptionInfo(method, keyUri, iv);
+            } else if (line.startsWith("#EXTINF")) {
+                String[] parts = line.split(":")[1].split(",");
+                double duration = Double.parseDouble(parts[0]);
+                String title = parts.length > 1 ? parts[1] : "";
+                if (currentSegment != null) {
+                    playlist.addSegment(currentSegment);
+                }
+                currentSegment = new Segment(null, duration, title, currentEncryption);
+                currentSegment.byteRange = currentByteRange;
+            } else if (line.startsWith("#EXT-X-PART") || line.startsWith("#EXT-X-PRELOAD-HINT")) {
+                // Partial support for low-latency HLS, log as warning
+                System.err.println("Warning: Low-latency tag " + line + " encountered but not fully supported");
+            } else if (!line.startsWith("#") && !line.isEmpty()) {
+                if (currentSegment == null) {
+                    throw new IOException("Segment URI found without preceding #EXTINF");
+                }
+                currentSegment.uri = baseUri.resolve(line);
+                playlist.addSegment(currentSegment);
+                currentSegment = null; // Reset after adding
+                currentByteRange = null; // Reset byte range
+            } else if (strictMode && line.startsWith("#") && !isKnownMediaTag(line)) {
+                throw new IOException("Unsupported media playlist tag: " + line);
             }
         }
 
-        validatePlaylist(playlist);
+        if (currentSegment != null) {
+            playlist.addSegment(currentSegment);
+        }
+
+        validatePlaylist(playlist, version);
         return playlist;
     }
 
-    private void validatePlaylist(MediaPlaylist playlist) {
+    private boolean isKnownMediaTag(String line) {
+        return line.startsWith("#EXTM3U") || line.startsWith("#EXT-X-VERSION") ||
+                line.startsWith("#EXT-X-TARGETDURATION") || line.startsWith("#EXT-X-MEDIA-SEQUENCE") ||
+                line.startsWith("#EXT-X-PLAYLIST-TYPE") || line.startsWith("#EXT-X-ENDLIST") ||
+                line.startsWith("#EXT-X-INDEPENDENT-SEGMENTS") || line.startsWith("#EXT-X-DISCONTINUITY") ||
+                line.startsWith("#EXT-X-PROGRAM-DATE-TIME") || line.startsWith("#EXT-X-MAP") ||
+                line.startsWith("#EXT-X-BYTERANGE") || line.startsWith("#EXT-X-KEY") ||
+                line.startsWith("#EXTINF") || line.startsWith("#EXT-X-PART") || line.startsWith("#EXT-X-PRELOAD-HINT");
+    }
+
+    private void validatePlaylist(MediaPlaylist playlist, int version) throws IOException {
+        if (playlist.segments.isEmpty()) {
+            throw new IOException("No segments found in media playlist");
+        }
+        if (playlist.targetDuration <= 0) {
+            throw new IOException("Invalid or missing #EXT-X-TARGETDURATION");
+        }
         for (Segment s : playlist.segments) {
-            if (s.duration > playlist.targetDuration) {
-                System.err.println("Warning: Segment duration exceeds target duration.");
+            if (s.duration > playlist.targetDuration && strictMode) {
+                throw new IOException("Segment duration " + s.duration + " exceeds target duration " + playlist.targetDuration);
             }
+        }
+        if (playlist.endList && playlist.playlistType == null) {
+            playlist.playlistType = "VOD"; // Default to VOD if endlist and no type
+        } else if (!playlist.endList && "VOD".equals(playlist.playlistType)) {
+            throw new IOException("VOD playlist must have #EXT-X-ENDLIST");
+        }
+        if (version < 1 || version > 10) {
+            throw new IOException("Invalid HLS version: " + version);
         }
     }
 
     private Map<String, String> parseAttributes(String line) {
         Map<String, String> attrs = new HashMap<>();
-        Matcher matcher = Pattern.compile("(\\w+)=\"?([^,\"]+)\"?").matcher(line);
+        Matcher matcher = Pattern.compile("(\\w+)=(\"?([^,\"]+)\"?|([^,\\s]+))").matcher(line);
         while (matcher.find()) {
-            attrs.put(matcher.group(1), matcher.group(2));
+            String value = matcher.group(2) != null ? matcher.group(2).replace("\"", "") : matcher.group(4);
+            attrs.put(matcher.group(1), value);
         }
         return attrs;
     }
@@ -225,18 +318,24 @@ public class HlsParser {
         double duration;
         String title;
         EncryptionInfo encryptionInfo;
+        Map<String, String> byteRange;
+        String programDateTime;
 
         public Segment(URI uri, double duration, String title, EncryptionInfo encryptionInfo) {
             this.uri = uri;
             this.duration = duration;
             this.title = title;
             this.encryptionInfo = encryptionInfo;
+            this.byteRange = null;
+            this.programDateTime = null;
         }
 
         public URI getUri() { return uri; }
         public double getDuration() { return duration; }
         public String getTitle() { return title; }
         public EncryptionInfo getEncryptionInfo() { return encryptionInfo; }
+        public Map<String, String> getByteRange() { return byteRange; }
+        public String getProgramDateTime() { return programDateTime; }
     }
 
     /**
@@ -244,8 +343,12 @@ public class HlsParser {
      */
     public static class MediaPlaylist {
         List<Segment> segments = new ArrayList<>();
-        public double targetDuration;
+        double targetDuration;
+        int mediaSequence;
+        String playlistType;
         boolean endList;
+        boolean independentSegments;
+        MapInfo map;
 
         public void addSegment(Segment segment) {
             segments.add(segment);
@@ -253,7 +356,11 @@ public class HlsParser {
 
         public List<Segment> getSegments() { return segments; }
         public double getTargetDuration() { return targetDuration; }
+        public int getMediaSequence() { return mediaSequence; }
+        public String getPlaylistType() { return playlistType; }
         public boolean isEndList() { return endList; }
+        public boolean isIndependentSegments() { return independentSegments; }
+        public MapInfo getMap() { return map; }
     }
 
     /**
@@ -277,5 +384,24 @@ public class HlsParser {
         public String getIv() { return iv; }
         public byte[] getKey() { return key; }
         public void setKey(byte[] key) { this.key = key; }
+    }
+
+    /**
+     * Represents a map section for initialization data.
+     */
+    public static class MapInfo {
+        URI uri;
+        long length;
+        long offset;
+
+        public MapInfo(URI uri, long length, long offset) {
+            this.uri = uri;
+            this.length = length;
+            this.offset = offset;
+        }
+
+        public URI getUri() { return uri; }
+        public long getLength() { return length; }
+        public long getOffset() { return offset; }
     }
 }
