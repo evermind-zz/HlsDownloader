@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * A segment combiner implementation that uses FFmpeg to concatenate .ts files into a single .mp4 file.
+ * A segment combiner implementation that uses FFmpeg to concatenate .ts files into a single output file.
  * This class leverages FFmpeg's concat demuxer to perform the combination without re-encoding,
  * preserving the original video and audio streams for efficiency. It monitors FFmpeg output to
  * detect inactivity and terminates the process if no progress is made within a specified time.
@@ -26,12 +26,14 @@ public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner 
     private static final int LOG_EXECUTOR_TIMEOUT_SECONDS = 1;   // Timeout for log executor shutdown
 
     /**
-     * Combines a list of .ts segment files into a single .mp4 file using FFmpeg.
+     * Combines a list of .ts segment files into a single output file using FFmpeg.
      *
      * @param tsSegments List of Path objects pointing to the .ts segment files to combine.
      *                   The order of files must match the intended playback sequence.
      * @param outputDir  The directory where temporary files and the final output will be stored.
-     * @param outputFile The full path (including filename) of the resulting .mp4 file.
+     * @param outputFile The full path (including filename and extension) of the resulting file.
+     *                   The extension determines the container format (e.g., .mp4, .mkv, .ts).
+     *                   Ensure FFmpeg supports the chosen format with stream copying (-c copy).
      * @throws IOException            If file operations or FFmpeg execution fails.
      * @throws FFmpegCombinationException If the FFmpeg process is interrupted, times out, or stalls.
      */
@@ -42,7 +44,7 @@ public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner 
         }
 
         try {
-            outputFile = combineTsToMp4(tsSegments, outputDir, outputFile);
+            combineTsToContainer(tsSegments, outputDir, outputFile);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt(); // Restore interrupted status
             throw new FFmpegCombinationException("FFmpeg combination interrupted", e);
@@ -80,24 +82,19 @@ public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner 
     }
 
     /**
-     * Executes FFmpeg to combine the .ts files into a single .mp4 file without re-encoding.
+     * Executes FFmpeg to combine the .ts files into a single output file without re-encoding.
+     * The output container format is determined by the extension of the output file (e.g., .mp4, .mkv, .ts).
      * Monitors FFmpeg output to detect inactivity and terminates the process if no progress
      * is made within {@link #INACTIVITY_THRESHOLD_SECONDS}.
      *
-     * @param tsFiles    List of Path objects for the .ts input files, ordered for playback.
-     * @param outputDir  Directory for temporary files and the output file.
-     * @param outputFile The full path (including filename) of the resulting .mp4 file.
-     * @return The full path of the outputFile with appended .mp4 if not already there
+     * @param tsFiles   List of Path objects for the .ts input files, ordered for playback.
+     * @param outputDir Directory for temporary files and the output file.
+     * @param outputFile The full path (including filename and extension) of the resulting file.
      * @throws IOException          If FFmpeg execution or file operations fail.
      * @throws InterruptedException If the FFmpeg process is interrupted.
      */
-    private String combineTsToMp4(List<Path> tsFiles, String outputDir, String outputFile)
+    private void combineTsToContainer(List<Path> tsFiles, String outputDir, String outputFile)
             throws IOException, InterruptedException {
-        // Validate output file path
-        if (!outputFile.endsWith(".mp4")) {
-            outputFile += ".mp4"; // Ensure MP4 extension
-        }
-
         // Create concat list file
         Path concatList = createConcatListFile(tsFiles, outputDir);
         Process process = null;
@@ -170,6 +167,5 @@ public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner 
                 }
             }
         }
-        return outputDir;
     }
 }
