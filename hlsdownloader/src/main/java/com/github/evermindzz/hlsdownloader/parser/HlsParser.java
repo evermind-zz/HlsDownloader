@@ -167,8 +167,16 @@ public class HlsParser {
                 }
                 URI keyUri = attrs.get("URI") != null ? baseUri.resolve(attrs.get("URI").replace("\"", "")) : null;
                 String iv = attrs.get("IV");
-                if (iv != null && iv.startsWith("0x") && iv.length() != 18) { // 0x + 16 hex chars
-                    throw new IOException("Invalid IV length: " + iv);
+                if (iv != null) {
+                    if (!iv.startsWith("0x")) {
+                        throw new IOException("IV must be a hexadecimal string starting with 0x: " + iv);
+                    }
+                    if (iv.length() != 34) { // 0x + 32 hex chars (16 bytes)
+                        throw new IOException("IV must be 16 bytes (32 hex chars after 0x), got length: " + (iv.length() - 2));
+                    }
+                    if (!isValidHex(iv.substring(2))) {
+                        throw new IOException("IV contains invalid hexadecimal characters: " + iv);
+                    }
                 }
                 if (version < 2 && iv != null) {
                     throw new IOException("IV requires version 2 or higher, current version: " + version);
@@ -209,6 +217,10 @@ public class HlsParser {
 
         validatePlaylist(playlist, version);
         return playlist;
+    }
+
+    private boolean isValidHex(String hex) {
+        return hex.matches("^[0-9a-fA-F]+$");
     }
 
     private boolean isKnownMediaTag(String line) {
