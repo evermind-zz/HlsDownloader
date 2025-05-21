@@ -108,11 +108,41 @@ public class HlsMediaProcessor {
      * @throws IOException If an I/O error occurs during download, parsing, or state management.
      */
     public void download(URI uri) throws IOException {
-        // Load previous state
+        initializeState();
+        List<Segment> segments = parsePlaylist(uri);
+        fetchEncryptionKeys(segments);
+        createOutputDirectory();
+
+        try {
+            downloadSegments(segments);
+            finalizeDownload(segments);
+        } catch (Exception e) {
+            handleDownloadException(e);
+        } finally {
+            cleanupExecutor();
+            if (isDownloadCancelled()) {
+                segmentStateManager.cleanupState();
+                updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
+            }
+        }
+    }
+
+    private void initializeState() throws IOException {
         Set<Integer> completedIndices = segmentStateManager.loadState();
         segmentStateManager.saveState(completedIndices); // Initial save to ensure file exists
+        executor = Executors.newFixedThreadPool(numThreads, r -> {
+            Thread t = new Thread(r);
+            t.setUncaughtExceptionHandler((thread, ex) -> {
+                System.err.println("Thread " + thread.getName() + " terminated with exception: " + ex.getMessage());
+                ex.printStackTrace();
+            });
+            return t;
+        });
+        pauseLatch = new CountDownLatch(1);
+        updateState(DownloadState.STARTED, "");
+    }
 
-        // Parse the playlist if not already parsed
+    private List<Segment> parsePlaylist(URI uri) throws IOException {
         if (playlist == null) {
             try {
                 playlist = parser.parse(uri);
@@ -127,10 +157,10 @@ public class HlsMediaProcessor {
                 throw new IOException(ERROR_NO_SEGMENTS);
             }
         }
+        return playlist.getSegments();
+    }
 
-        List<Segment> segments = playlist.getSegments();
-
-        // Pre-fetch all unique keys
+    private void fetchEncryptionKeys(List<Segment> segments) throws IOException {
         Set<HlsParser.EncryptionInfo> uniqueEncryptionInfos = new HashSet<>();
         for (HlsParser.Segment segment : segments) {
             HlsParser.EncryptionInfo encryptionInfo = segment.getEncryptionInfo();
@@ -149,10 +179,13 @@ public class HlsMediaProcessor {
                 String message = String.format(ERROR_FETCHING_KEY, e.getMessage());
                 updateState(DownloadState.ERROR, message);
                 throw e;
+            } finally {
+                fetcher.disconnect();
             }
         }
+    }
 
-        // Create output directory
+    private void createOutputDirectory() throws IOException {
         try {
             Files.createDirectories(Paths.get(outputDir));
         } catch (IOException e) {
@@ -160,125 +193,123 @@ public class HlsMediaProcessor {
             updateState(DownloadState.ERROR, message);
             throw e;
         }
+    }
 
-        // Initialize executor and state
-        executor = Executors.newFixedThreadPool(numThreads, r -> {
-            Thread t = new Thread(r);
-            t.setUncaughtExceptionHandler((thread, ex) -> {
-                System.err.println("Thread " + thread.getName() + " terminated with exception: " + ex.getMessage());
-                ex.printStackTrace();
-            });
-            return t;
-        });
-        pauseLatch = new CountDownLatch(1);
-        updateState(DownloadState.STARTED, "");
+    private void downloadSegments(List<Segment> segments) throws IOException {
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        ConcurrentSkipListSet<Integer> completedSet = new ConcurrentSkipListSet<>(segmentStateManager.loadState());
+        AtomicInteger progress = new AtomicInteger(completedSet.size());
 
-        try {
-            // Download segments in parallel using CompletableFuture
-            List<CompletableFuture<Void>> futures = new ArrayList<>();
-            ConcurrentSkipListSet<Integer> completedSet = new ConcurrentSkipListSet<>(completedIndices);
-            AtomicInteger progress = new AtomicInteger(completedSet.size());
+        for (int i = 0; i < segments.size(); i++) {
+            if (completedSet.contains(i)) continue;
+            int index = i;
+            HlsParser.Segment segment = segments.get(i);
+            CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                try {
+                    handlePause();
+                    if (isDownloadCancelled()) return;
 
-            for (int i = 0; i < segments.size(); i++) {
-                if (completedSet.contains(i)) continue;
-                int index = i;
-                HlsParser.Segment segment = segments.get(i);
-                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                    try {
-                        // Check pause state
-                        while (isPaused.get()) {
-                            pauseLatch.await(1, TimeUnit.SECONDS); // Periodic check with timeout
-                            if (Thread.interrupted()) return;
+                    String segmentFile = outputDir + "/segment_" + (index + 1) + ".ts";
+                    try (InputStream in = processSegment(segment, index)) {
+                        if (isDownloadCancelled()) {
+                            throw new InterruptedIOException("Download cancelled during I/O");
                         }
-                        // Check cancellation before starting work
-                        if (isCancelled.get() || cancellationRequested.get() || Thread.interrupted()) {
-                            return;
-                        }
-                        String segmentFile = outputDir + "/segment_" + (index + 1) + ".ts";
-                        try (InputStream in = processSegment(segment, index)) {
-                            if (Thread.interrupted() || isCancelled.get() || cancellationRequested.get()) {
-                                throw new InterruptedIOException("Download cancelled during I/O");
-                            }
-                            Files.copy(in, Paths.get(segmentFile), StandardCopyOption.REPLACE_EXISTING);
-                        }
-                        completedSet.add(index);
-                        synchronized (segmentStateManager) {
-                            segmentStateManager.saveState(new HashSet<>(completedSet));
-                        }
-                        int currentProgress = progress.incrementAndGet();
-                        progressCallback.onProgressUpdate(currentProgress, segments.size());
-                        // Check cancellation again after progress update
-                        if (isCancelled.get() || cancellationRequested.get()) {
-                            throw new InterruptedIOException("Download cancelled after progress");
-                        }
-                    } catch (IOException e) {
-                        System.err.println("HLSIOException in thread: " + Thread.currentThread().getName() + ", " + e.getMessage());
-                        throw new RuntimeException("Failed to process segment " + (index + 1), e); // wrap exception
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt(); // Restore interrupted status
+                        Files.copy(in, Paths.get(segmentFile), StandardCopyOption.REPLACE_EXISTING);
                     }
-                }, executor);
-                futures.add(future);
-            }
-
-            // Wait for all futures to complete or be cancelled
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-
-            // Final state determination
-            if (isCancelled.get() || cancellationRequested.get()) {
-                segmentStateManager.cleanupState();
-                updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
-            } else if (isPaused.get()) {
-                updateState(DownloadState.PAUSED, "");
-            } else if (completedSet.size() == segments.size()) {
-                List<Path> tsSegments = new ArrayList<>();
-                for (int i = 0; i < segments.size(); i++) {
-                    String segmentFile = outputDir + "/segment_" + (i + 1) + ".ts";
-                    Path tsFile = Paths.get(segmentFile);
-                    if (completedSet.contains(i) && !Files.exists(tsFile)) {
-                        String message = String.format(ERROR_MISSING_SEGMENT, segmentFile);
-                        updateState(DownloadState.ERROR, message);
-                        throw new IOException(message);
+                    completedSet.add(index);
+                    synchronized (segmentStateManager) {
+                        segmentStateManager.saveState(new HashSet<>(completedSet));
                     }
-                    tsSegments.add(tsFile);
+                    int currentProgress = progress.incrementAndGet();
+                    progressCallback.onProgressUpdate(currentProgress, segments.size());
+                    if (isDownloadCancelled()) {
+                        throw new InterruptedIOException("Download cancelled after progress");
+                    }
+                } catch (IOException e) {
+                    throw new RuntimeException("Failed to process segment " + (index + 1), e);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Segment download interrupted", e);
                 }
-                segmentCombiner.combineSegments(tsSegments, outputDir, outputFile);
-                updateState(DownloadState.COMPLETED, "");
-                segmentStateManager.cleanupState();
-            } else {
-                updateState(DownloadState.ERROR, "Incomplete download");
+            }, executor);
+            futures.add(future);
+        }
+
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+    }
+
+    private void handlePause() throws InterruptedException {
+        if (isPaused.get()) {
+            try {
+                pauseLatch.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw e;
             }
-        } catch (CompletionException e) {
-            if (e.getCause() instanceof InterruptedIOException) {
+        }
+    }
+
+    private void finalizeDownload(List<Segment> segments) throws IOException {
+        if (isDownloadCancelled()) {
+            segmentStateManager.cleanupState();
+            updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
+        } else if (isPaused.get()) {
+            updateState(DownloadState.PAUSED, "");
+        } else {
+            List<Path> tsSegments = new ArrayList<>();
+            for (int i = 0; i < segments.size(); i++) {
+                String segmentFile = outputDir + "/segment_" + (i + 1) + ".ts";
+                Path tsFile = Paths.get(segmentFile);
+                if (!Files.exists(tsFile)) {
+                    String message = String.format(ERROR_MISSING_SEGMENT, segmentFile);
+                    updateState(DownloadState.ERROR, message);
+                    throw new IOException(message);
+                }
+                tsSegments.add(tsFile);
+            }
+            segmentCombiner.combineSegments(tsSegments, outputDir, outputFile);
+            updateState(DownloadState.COMPLETED, "");
+            segmentStateManager.cleanupState();
+        }
+    }
+
+    private void handleDownloadException(Exception e) throws IOException {
+        if (e instanceof CompletionException) {
+            CompletionException ce = (CompletionException) e;
+            if (ce.getCause() instanceof InterruptedIOException) {
                 segmentStateManager.cleanupState();
                 updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
-            } else if (e.getCause() instanceof RuntimeException && e.getCause().getCause() instanceof IOException) {
-                IOException ioException = (IOException) e.getCause().getCause(); // unwrap exception
+            } else if (ce.getCause() instanceof RuntimeException && ce.getCause().getCause() instanceof IOException) {
+                IOException ioException = (IOException) ce.getCause().getCause();
                 updateState(DownloadState.ERROR, ioException.getMessage());
                 throw ioException;
-            } else if (e.getCause() instanceof InterruptedException) {
+            } else if (ce.getCause() instanceof InterruptedException) {
                 segmentStateManager.cleanupState();
                 updateState(DownloadState.CANCELLED, MESSAGE_INTERRUPTED);
             } else {
-                updateState(DownloadState.ERROR, e.getCause().getMessage());
-                throw e;
+                updateState(DownloadState.ERROR, ce.getCause().getMessage());
+                throw new IOException(ce.getCause());
             }
-        } finally {
-            if (executor != null) {
-                executor.shutdownNow();
-                try {
-                    if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
-                        System.err.println("Executor did not terminate in time");
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
+        } else {
+            throw new IOException(e);
+        }
+    }
+
+    private void cleanupExecutor() {
+        if (executor != null) {
+            executor.shutdownNow();
+            try {
+                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    System.err.println("Executor did not terminate in time");
                 }
-            }
-            if (isCancelled.get() || cancellationRequested.get()) {
-                segmentStateManager.cleanupState();
-                updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
         }
+    }
+
+    private boolean isDownloadCancelled() {
+        return isCancelled.get() || cancellationRequested.get() || Thread.interrupted();
     }
 
     /**
@@ -290,26 +321,37 @@ public class HlsMediaProcessor {
      * @throws IOException If fetching or decryption fails.
      */
     InputStream processSegment(HlsParser.Segment segment, int segmentIndex) throws IOException {
-        if (isCancelled.get() || cancellationRequested.get() || Thread.interrupted()) {
+        if (isDownloadCancelled()) {
             throw new InterruptedIOException("Download cancelled");
         }
-        InputStream segmentStream = fetcher.fetchContent(segment.getUri());
-        if (Thread.interrupted() || isCancelled.get() || cancellationRequested.get()) {
-            segmentStream.close();
-            throw new InterruptedIOException("Download cancelled during fetch");
-        }
-        if (segment.getEncryptionInfo() != null) {
-            byte[] key = segment.getEncryptionInfo().getKey();
-            if (key == null) {
-                throw new IllegalStateException("Key should be pre-fetched for encryption info: " + segment.getEncryptionInfo().getUri());
+        InputStream segmentStream = null;
+        try {
+            segmentStream = fetcher.fetchContent(segment.getUri());
+            if (isDownloadCancelled()) {
+                throw new InterruptedIOException("Download cancelled during fetch");
             }
-            try {
-                return decryptor.decrypt(segmentStream, key, segment.getEncryptionInfo(), segmentIndex);
-            } catch (GeneralSecurityException e) {
-                throw new IOException(String.format(ERROR_DECRYPTION_FAILED, e.getMessage()), e);
+            if (segment.getEncryptionInfo() != null) {
+                byte[] key = segment.getEncryptionInfo().getKey();
+                if (key == null) {
+                    throw new IllegalStateException("Key should be pre-fetched for encryption info: " + segment.getEncryptionInfo().getUri());
+                }
+                try {
+                    return decryptor.decrypt(segmentStream, key, segment.getEncryptionInfo(), segmentIndex);
+                } catch (GeneralSecurityException e) {
+                    throw new IOException(String.format(ERROR_DECRYPTION_FAILED, e.getMessage()), e);
+                }
             }
+            return segmentStream;
+        } finally {
+            if (segmentStream != null) {
+                try {
+                    segmentStream.close();
+                } catch (IOException e) {
+                    System.err.println("Failed to close segment stream: " + e.getMessage());
+                }
+            }
+            fetcher.disconnect(); // Safe disconnect call
         }
-        return segmentStream;
     }
 
     /**
@@ -442,7 +484,6 @@ public class HlsMediaProcessor {
     public static class DefaultDecryptor implements Decryptor {
         @Override
         public InputStream decrypt(InputStream encryptedStream, byte[] key, HlsParser.EncryptionInfo encryptionInfo, int segmentIndex) throws IOException, GeneralSecurityException {
-            // Initialize AES-128-CBC cipher
             Cipher cipher = Cipher.getInstance("AES/CBC/NoPadding");
             byte[] iv = parseIv(encryptionInfo.getIv(), segmentIndex);
             SecretKeySpec keySpec = new SecretKeySpec(key, "AES");
@@ -450,7 +491,6 @@ public class HlsMediaProcessor {
 
             cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
 
-            // Read encrypted data and decrypt
             ByteArrayOutputStream decryptedOutput = new ByteArrayOutputStream();
             byte[] buffer = new byte[8192];
             int bytesRead;
@@ -470,17 +510,14 @@ public class HlsMediaProcessor {
 
         private byte[] parseIv(String ivStr, int segmentIndex) {
             if (ivStr == null || ivStr.isEmpty()) {
-                // Default IV to segment sequence number (HLS spec)
                 byte[] iv = new byte[16];
                 Arrays.fill(iv, (byte) 0);
                 iv[15] = (byte) (segmentIndex & 0xFF);
                 return iv;
             }
-            // Parse hex string (e.g., "0xabcdef")
             if (ivStr.startsWith("0x")) {
                 ivStr = ivStr.substring(2);
             }
-            // Ensure the hex string is 32 chars long (16 bytes)
             if (ivStr.length() != 32) {
                 throw new IllegalArgumentException("IV hex string must represent 16 bytes, got " + ivStr.length() / 2 + " bytes");
             }
@@ -497,22 +534,33 @@ public class HlsMediaProcessor {
      * Default implementation of Fetcher using basic HTTP downloading.
      */
     public static class DefaultFetcher implements HlsParser.Fetcher {
-        HttpURLConnection connection;
+        private HttpURLConnection connection;
 
         @Override
         public InputStream fetchContent(URI uri) throws IOException {
-            connection = (HttpURLConnection) uri.toURL().openConnection();
-            connection.setRequestMethod("GET");
-            connection.setConnectTimeout(10000);
-            connection.setReadTimeout(10000);
-            return connection.getInputStream();
+            disconnect(); // Ensure previous connection is closed
+            try {
+                connection = (HttpURLConnection) uri.toURL().openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(10000);
+                connection.setReadTimeout(10000);
+                return connection.getInputStream();
+            } catch (IOException e) {
+                disconnect(); // Clean up on failure
+                throw e;
+            }
         }
 
         @Override
         public void disconnect() {
             if (connection != null) {
-                connection.disconnect();
-                connection = null;
+                try {
+                    connection.disconnect();
+                } catch (Exception e) {
+                    System.err.println("Failed to disconnect HttpURLConnection: " + e.getMessage());
+                } finally {
+                    connection = null; // Reset to avoid reusing stale reference
+                }
             }
         }
     }
