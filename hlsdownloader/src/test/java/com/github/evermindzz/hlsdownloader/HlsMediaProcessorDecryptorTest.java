@@ -159,11 +159,6 @@ public static String byteArrayToHex(byte[] a) {
             return new ByteArrayInputStream("".getBytes());
         }
 
-        @Override
-        public void disconnect() {
-            // No-op for test
-        }
-
         private byte[] parseIv(String ivStr, int segmentIndex) {
             if (ivStr == null || ivStr.isEmpty()) {
                 byte[] iv = new byte[16];
