@@ -9,6 +9,7 @@ import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
 import java.net.HttpURLConnection;
+import java.net.SocketException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -350,7 +351,7 @@ public class HlsMediaProcessor {
                     System.err.println("Failed to close segment stream: " + e.getMessage());
                 }
             }
-            fetcher.disconnect(); // Safe disconnect call
+            fetcher.disconnect();
         }
     }
 
@@ -534,34 +535,57 @@ public class HlsMediaProcessor {
      * Default implementation of Fetcher using basic HTTP downloading.
      */
     public static class DefaultFetcher implements HlsParser.Fetcher {
-        private HttpURLConnection connection;
+        private static final int MAX_RETRIES = 3;
+        private static final int RETRY_DELAY_MS = 1000;
 
         @Override
         public InputStream fetchContent(URI uri) throws IOException {
-            disconnect(); // Ensure previous connection is closed
-            try {
-                connection = (HttpURLConnection) uri.toURL().openConnection();
-                connection.setRequestMethod("GET");
-                connection.setConnectTimeout(10000);
-                connection.setReadTimeout(10000);
-                return connection.getInputStream();
-            } catch (IOException e) {
-                disconnect(); // Clean up on failure
-                throw e;
+            HttpURLConnection connection = null;
+            int attempt = 0;
+            while (attempt < MAX_RETRIES) {
+                try {
+                    System.out.println("Fetching URI: " + uri + " (Attempt " + (attempt + 1) + ")");
+                    connection = (HttpURLConnection) uri.toURL().openConnection();
+                    connection.setRequestMethod("GET");
+                    connection.setConnectTimeout(10000); // Increased timeout
+                    connection.setReadTimeout(10000); // Increased timeout
+                    return connection.getInputStream();
+                } catch (SocketException e) {
+                    System.err.println("SocketException while fetching " + uri + ": " + e.getMessage());
+                    if (connection != null) {
+                        try {
+                            connection.disconnect();
+                        } catch (Exception disconnectEx) {
+                            System.err.println("Failed to disconnect after SocketException: " + disconnectEx.getMessage());
+                        }
+                    }
+                    attempt++;
+                    if (attempt >= MAX_RETRIES) {
+                        throw new IOException("Failed to fetch " + uri + " after " + MAX_RETRIES + " attempts: " + e.getMessage(), e);
+                    }
+                    try {
+                        Thread.sleep(RETRY_DELAY_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Interrupted during retry delay", ie);
+                    }
+                } catch (IOException e) {
+                    if (connection != null) {
+                        try {
+                            connection.disconnect();
+                        } catch (Exception disconnectEx) {
+                            System.err.println("Failed to disconnect after IOException: " + disconnectEx.getMessage());
+                        }
+                    }
+                    throw e;
+                }
             }
+            throw new IOException("Unexpected failure after retries for URI: " + uri);
         }
 
         @Override
         public void disconnect() {
-            if (connection != null) {
-                try {
-                    connection.disconnect();
-                } catch (Exception e) {
-                    System.err.println("Failed to disconnect HttpURLConnection: " + e.getMessage());
-                } finally {
-                    connection = null; // Reset to avoid reusing stale reference
-                }
-            }
+            // No-op since each fetch operation creates its own connection
         }
     }
 
