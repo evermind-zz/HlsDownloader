@@ -13,16 +13,11 @@ import java.io.InputStream;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Set;
+import java.security.GeneralSecurityException;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -96,7 +91,7 @@ class HlsMediaProcessorTest {
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
                 fetcher, decryptor,
                 numThreads,
-                new FileSegmentStateManager(stateFile),
+                new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
                 null, // Use default SegmentCombiner
                 (progress, total) -> {},
                 (state, message) -> {});
@@ -124,7 +119,7 @@ class HlsMediaProcessorTest {
                 new MockFetcher(TWO_SEGMENT_PLAYLIST, barrier), // Pass the barrier to MockFetcher
                 new MockDecryptor(),
                 2, // Use 2 threads to simulate concurrency
-                new FileSegmentStateManager(stateFile),
+                new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
                 null, // Use default SegmentCombiner
                 (progress, total) -> {
                     int count = segmentCounter.incrementAndGet();
@@ -229,7 +224,7 @@ class HlsMediaProcessorTest {
                 new MockFetcher(TWO_SEGMENT_PLAYLIST, barrier),
                 new MockDecryptor(),
                 2, // Use 2 threads to simulate concurrency
-                new FileSegmentStateManager(stateFile),
+                new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
                 null, // Use default SegmentCombiner
                 (progress, total) -> {
                     int count = segmentCounter.incrementAndGet();
@@ -292,7 +287,7 @@ class HlsMediaProcessorTest {
                 new MockFetcher(emptyPlaylist),
                 new MockDecryptor(),
                 2,
-                new FileSegmentStateManager(stateFile),
+                new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
                 null,
                 (progress, total) -> {},
                 (state, message) -> {
@@ -314,39 +309,6 @@ class HlsMediaProcessorTest {
         return (int) Files.list(Path.of(outputDir))
                 .filter(p -> p.getFileName().toString().startsWith("segment_"))
                 .count();
-    }
-
-    private static class FileSegmentStateManager implements HlsMediaProcessor.SegmentStateManager {
-        private final String stateFile;
-
-        public FileSegmentStateManager(String stateFile) {
-            this.stateFile = stateFile;
-        }
-
-        @Override
-        public Set<Integer> loadState() throws IOException {
-            if (Files.exists(Path.of(stateFile))) {
-                String content = Files.readString(Path.of(stateFile)).trim();
-                return content.isEmpty() ? new HashSet<>() : Arrays.stream(content.split(","))
-                        .map(String::trim)
-                        .map(Integer::parseInt)
-                        .collect(Collectors.toSet());
-            }
-            return new HashSet<>();
-        }
-
-        @Override
-        public void saveState(Set<Integer> completedIndices) throws IOException {
-            Files.writeString(Paths.get(stateFile), completedIndices.stream()
-                    .sorted()
-                    .map(Object::toString)
-                    .collect(Collectors.joining(",")));
-        }
-
-        @Override
-        public void cleanupState() throws IOException {
-            Files.deleteIfExists(Paths.get(stateFile));
-        }
     }
 
     private static class MockFetcher implements HlsParser.Fetcher {
@@ -403,7 +365,7 @@ class HlsMediaProcessorTest {
         }
 
         @Override
-        public InputStream decrypt(InputStream encryptedStream, byte[] key, HlsParser.EncryptionInfo encryptionInfo) throws IOException {
+        public InputStream decrypt(InputStream encryptedStream, byte[] key, HlsParser.EncryptionInfo encryptionInfo, int segmentIndex) throws IOException, GeneralSecurityException {
             byte[] encryptedData = encryptedStream.readAllBytes();
             byte[] decryptedData = new byte[encryptedData.length];
             if (keys != null) {
@@ -419,5 +381,26 @@ class HlsMediaProcessorTest {
 
     static byte reverseByte(byte b) {
         return (byte) (Integer.reverse(b) >>> (Integer.SIZE - Byte.SIZE));
+    }
+
+    @Test
+    void testWithActualData() throws IOException {
+        String localTestUri = "http://localhost:2002/input_hls/playlist.m3u8";
+        //String localTestUri = "https://1a-1791.com/video/fww1/60/s8/2/V/J/m/J/VJmJy.haa.rec.tar?r_file=chunklist.m3u8&r_type=application%2Fvnd.apple.mpegurl&r_range=434384896-434393686";
+        HlsParser.Fetcher defaultFetcher = new HlsMediaProcessor.DefaultFetcher();
+        parser = new HlsParser(null, defaultFetcher, true);
+        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+                defaultFetcher, null,
+                2,
+                new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
+                new FFmpegSegmentCombiner(),
+                (progress, total) -> {},
+                (state, message) -> {});
+
+        downloader.download(URI.create(localTestUri));
+
+        assertTrue(Files.exists(Path.of(outputFile)));
+        assertFalse(Files.exists(Path.of(stateFile)));
+        assertEquals(0, countSegmentFiles());
     }
 }
