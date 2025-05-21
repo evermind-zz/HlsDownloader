@@ -5,6 +5,7 @@ import com.github.evermindzz.hlsdownloader.parser.HlsParser.MediaPlaylist;
 import com.github.evermindzz.hlsdownloader.parser.HlsParser.Segment;
 
 import javax.crypto.Cipher;
+import javax.crypto.CipherInputStream;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
@@ -208,12 +209,12 @@ public class HlsMediaProcessor {
                     handlePause();
                     if (isDownloadCancelled()) return;
 
-                    String segmentFile = outputDir + "/segment_" + (index + 1) + ".ts";
+                    Path segmentFile = getSegmentFileName(index);
                     try (InputStream in = processSegment(segment, index)) {
                         if (isDownloadCancelled()) {
                             throw new InterruptedIOException("Download cancelled during I/O");
                         }
-                        Files.copy(in, Paths.get(segmentFile), StandardCopyOption.REPLACE_EXISTING);
+                        Files.copy(in, segmentFile, StandardCopyOption.REPLACE_EXISTING);
                     }
                     completedSet.add(index);
                     synchronized (segmentStateManager) {
@@ -237,6 +238,10 @@ public class HlsMediaProcessor {
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
     }
 
+    private Path getSegmentFileName(int index) {
+        return Paths.get(outputDir + "/segment_" + (index + 1) + ".ts");
+    }
+
     private void handlePause() throws InterruptedException {
         if (isPaused.get()) {
             try {
@@ -257,14 +262,13 @@ public class HlsMediaProcessor {
         } else {
             List<Path> tsSegments = new ArrayList<>();
             for (int i = 0; i < segments.size(); i++) {
-                String segmentFile = outputDir + "/segment_" + (i + 1) + ".ts";
-                Path tsFile = Paths.get(segmentFile);
-                if (!Files.exists(tsFile)) {
+                Path segmentFile = getSegmentFileName(i);
+                if (!Files.exists(segmentFile)) {
                     String message = String.format(ERROR_MISSING_SEGMENT, segmentFile);
                     updateState(DownloadState.ERROR, message);
                     throw new IOException(message);
                 }
-                tsSegments.add(tsFile);
+                tsSegments.add(segmentFile);
             }
             segmentCombiner.combineSegments(tsSegments, outputDir, outputFile);
             updateState(DownloadState.COMPLETED, "");
@@ -323,33 +327,28 @@ public class HlsMediaProcessor {
         if (isDownloadCancelled()) {
             throw new InterruptedIOException("Download cancelled");
         }
-        InputStream segmentStream = null;
-        try {
-            segmentStream = fetcher.fetchContent(segment.getUri());
-            if (isDownloadCancelled()) {
-                throw new InterruptedIOException("Download cancelled during fetch");
+        InputStream originalStream = fetcher.fetchContent(segment.getUri());
+        if (isDownloadCancelled()) {
+            throw new InterruptedIOException("Download cancelled during fetch");
+        }
+        if (segment.getEncryptionInfo() != null) {
+            byte[] key = segment.getEncryptionInfo().getKey();
+            if (key == null) {
+                throw new IllegalStateException("Key should be pre-fetched for encryption info: " + segment.getEncryptionInfo().getUri());
             }
-            if (segment.getEncryptionInfo() != null) {
-                byte[] key = segment.getEncryptionInfo().getKey();
-                if (key == null) {
-                    throw new IllegalStateException("Key should be pre-fetched for encryption info: " + segment.getEncryptionInfo().getUri());
-                }
+            try {
+                // expect wrapped stream from Decryptor as return
+                return decryptor.decrypt(originalStream, key, segment.getEncryptionInfo(), segmentIndex);
+            } catch (GeneralSecurityException e) {
                 try {
-                    return decryptor.decrypt(segmentStream, key, segment.getEncryptionInfo(), segmentIndex);
-                } catch (GeneralSecurityException e) {
-                    throw new IOException(String.format(ERROR_DECRYPTION_FAILED, e.getMessage()), e);
+                    originalStream.close();
+                } catch (IOException closeException) {
+                    System.err.println("Failed to close original stream: " + closeException.getMessage());
                 }
-            }
-            return segmentStream;
-        } finally {
-            if (segmentStream != null) {
-                try {
-                    segmentStream.close();
-                } catch (IOException e) {
-                    System.err.println("Failed to close segment stream: " + e.getMessage());
-                }
+                throw new IOException(String.format(ERROR_DECRYPTION_FAILED, e.getMessage()), e);
             }
         }
+        return originalStream; // Return original stream if no decryption
     }
 
     /**
@@ -406,16 +405,16 @@ public class HlsMediaProcessor {
      * Default implementation of SegmentStateManager using file-based persistence.
      */
     public static class DefaultSegmentStateManager implements SegmentStateManager {
-        private final String stateFile;
+        private final Path stateFile;
 
         public DefaultSegmentStateManager(String stateFile) {
-            this.stateFile = stateFile;
+            this.stateFile = Paths.get(stateFile);
         }
 
         @Override
         public Set<Integer> loadState() throws IOException {
-            if (Files.exists(Paths.get(stateFile))) {
-                String content = Files.readString(Paths.get(stateFile)).trim();
+            if (Files.exists(stateFile)) {
+                String content = Files.readString(stateFile).trim();
                 return content.isEmpty() ? new HashSet<>() : Arrays.stream(content.split(","))
                         .map(String::trim)
                         .map(Integer::parseInt)
@@ -426,7 +425,7 @@ public class HlsMediaProcessor {
 
         @Override
         public void saveState(Set<Integer> completedIndices) throws IOException {
-            Files.writeString(Paths.get(stateFile), completedIndices.stream()
+            Files.writeString(stateFile, completedIndices.stream()
                     .sorted()
                     .map(Object::toString)
                     .collect(Collectors.joining(",")));
@@ -434,7 +433,7 @@ public class HlsMediaProcessor {
 
         @Override
         public void cleanupState() throws IOException {
-            Files.deleteIfExists(Paths.get(stateFile));
+            Files.deleteIfExists(stateFile);
             System.out.println("State file cleaned up: " + stateFile);
         }
     }
@@ -477,7 +476,7 @@ public class HlsMediaProcessor {
     }
 
     /**
-     * Default implementation of Decryptor using AES-128-CBC.
+     * Default implementation of Decryptor using AES-128-CBC with streaming decryption.
      */
     public static class DefaultDecryptor implements Decryptor {
         @Override
@@ -488,22 +487,7 @@ public class HlsMediaProcessor {
             IvParameterSpec ivSpec = new IvParameterSpec(iv);
 
             cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec);
-
-            ByteArrayOutputStream decryptedOutput = new ByteArrayOutputStream();
-            byte[] buffer = new byte[8192];
-            int bytesRead;
-            while ((bytesRead = encryptedStream.read(buffer)) != -1) {
-                byte[] decryptedBlock = cipher.update(buffer, 0, bytesRead);
-                if (decryptedBlock != null) {
-                    decryptedOutput.write(decryptedBlock);
-                }
-            }
-            byte[] finalBlock = cipher.doFinal();
-            if (finalBlock != null) {
-                decryptedOutput.write(finalBlock);
-            }
-
-            return new ByteArrayInputStream(decryptedOutput.toByteArray());
+            return new CipherInputStream(encryptedStream, cipher);
         }
 
         private byte[] parseIv(String ivStr, int segmentIndex) {
@@ -561,18 +545,9 @@ public class HlsMediaProcessor {
                     }
                 } catch (IOException e) {
                     throw e;
-                } finally {
-                    if (connection != null) {
-                        connection.disconnect(); // Clean up connection on failure or completion
-                    }
                 }
             }
             throw new IOException("Unexpected failure after retries for URI: " + uri);
-        }
-
-        @Override
-        public void disconnect() {
-            // No-op since connections are managed within fetchContent
         }
     }
 
