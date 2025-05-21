@@ -213,7 +213,7 @@ public class HlsMediaProcessor {
                         }
                     } catch (IOException e) {
                         System.err.println("HLSIOException in thread: " + Thread.currentThread().getName() + ", " + e.getMessage());
-                        throw new RuntimeException("Failed to process segment " + (index + 1), e);
+                        throw new RuntimeException("Failed to process segment " + (index + 1), e); // wrap exception
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt(); // Restore interrupted status
                     }
@@ -253,7 +253,7 @@ public class HlsMediaProcessor {
                 segmentStateManager.cleanupState();
                 updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
             } else if (e.getCause() instanceof RuntimeException && e.getCause().getCause() instanceof IOException) {
-                IOException ioException = (IOException) e.getCause().getCause();
+                IOException ioException = (IOException) e.getCause().getCause(); // unwrap exception
                 updateState(DownloadState.ERROR, ioException.getMessage());
                 throw ioException;
             } else if (e.getCause() instanceof InterruptedException) {
@@ -261,7 +261,7 @@ public class HlsMediaProcessor {
                 updateState(DownloadState.CANCELLED, MESSAGE_INTERRUPTED);
             } else {
                 updateState(DownloadState.ERROR, e.getCause().getMessage());
-                throw new IOException(e.getCause());
+                throw e;
             }
         } finally {
             if (executor != null) {
@@ -368,7 +368,7 @@ public class HlsMediaProcessor {
     public static class DefaultSegmentStateManager implements SegmentStateManager {
         private final String stateFile;
 
-        DefaultSegmentStateManager(String stateFile) {
+        public DefaultSegmentStateManager(String stateFile) {
             this.stateFile = stateFile;
         }
 
@@ -376,10 +376,7 @@ public class HlsMediaProcessor {
         public Set<Integer> loadState() throws IOException {
             if (Files.exists(Paths.get(stateFile))) {
                 String content = Files.readString(Paths.get(stateFile)).trim();
-                if (content.isEmpty()) {
-                    return new HashSet<>();
-                }
-                return Arrays.stream(content.split(","))
+                return content.isEmpty() ? new HashSet<>() : Arrays.stream(content.split(","))
                         .map(String::trim)
                         .map(Integer::parseInt)
                         .collect(Collectors.toSet());
