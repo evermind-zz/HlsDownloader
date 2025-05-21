@@ -180,8 +180,6 @@ public class HlsMediaProcessor {
                 String message = String.format(ERROR_FETCHING_KEY, e.getMessage());
                 updateState(DownloadState.ERROR, message);
                 throw e;
-            } finally {
-                fetcher.disconnect();
             }
         }
     }
@@ -351,7 +349,6 @@ public class HlsMediaProcessor {
                     System.err.println("Failed to close segment stream: " + e.getMessage());
                 }
             }
-            fetcher.disconnect();
         }
     }
 
@@ -540,25 +537,18 @@ public class HlsMediaProcessor {
 
         @Override
         public InputStream fetchContent(URI uri) throws IOException {
-            HttpURLConnection connection = null;
             int attempt = 0;
             while (attempt < MAX_RETRIES) {
+                HttpURLConnection connection = null;
                 try {
                     System.out.println("Fetching URI: " + uri + " (Attempt " + (attempt + 1) + ")");
                     connection = (HttpURLConnection) uri.toURL().openConnection();
                     connection.setRequestMethod("GET");
-                    connection.setConnectTimeout(10000); // Increased timeout
-                    connection.setReadTimeout(10000); // Increased timeout
+                    connection.setConnectTimeout(10000);
+                    connection.setReadTimeout(10000);
                     return connection.getInputStream();
                 } catch (SocketException e) {
                     System.err.println("SocketException while fetching " + uri + ": " + e.getMessage());
-                    if (connection != null) {
-                        try {
-                            connection.disconnect();
-                        } catch (Exception disconnectEx) {
-                            System.err.println("Failed to disconnect after SocketException: " + disconnectEx.getMessage());
-                        }
-                    }
                     attempt++;
                     if (attempt >= MAX_RETRIES) {
                         throw new IOException("Failed to fetch " + uri + " after " + MAX_RETRIES + " attempts: " + e.getMessage(), e);
@@ -570,14 +560,11 @@ public class HlsMediaProcessor {
                         throw new IOException("Interrupted during retry delay", ie);
                     }
                 } catch (IOException e) {
-                    if (connection != null) {
-                        try {
-                            connection.disconnect();
-                        } catch (Exception disconnectEx) {
-                            System.err.println("Failed to disconnect after IOException: " + disconnectEx.getMessage());
-                        }
-                    }
                     throw e;
+                } finally {
+                    if (connection != null) {
+                        connection.disconnect(); // Clean up connection on failure or completion
+                    }
                 }
             }
             throw new IOException("Unexpected failure after retries for URI: " + uri);
@@ -585,7 +572,7 @@ public class HlsMediaProcessor {
 
         @Override
         public void disconnect() {
-            // No-op since each fetch operation creates its own connection
+            // No-op since connections are managed within fetchContent
         }
     }
 
