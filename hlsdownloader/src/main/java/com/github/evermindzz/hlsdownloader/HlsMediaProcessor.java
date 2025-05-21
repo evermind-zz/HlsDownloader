@@ -11,6 +11,7 @@ import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.security.GeneralSecurityException;
@@ -230,15 +231,18 @@ public class HlsMediaProcessor {
             } else if (isPaused.get()) {
                 updateState(DownloadState.PAUSED, "");
             } else if (completedSet.size() == segments.size()) {
+                List<Path> tsSegments = new ArrayList<>();
                 for (int i = 0; i < segments.size(); i++) {
                     String segmentFile = outputDir + "/segment_" + (i + 1) + ".ts";
-                    if (completedSet.contains(i) && !Files.exists(Paths.get(segmentFile))) {
+                    Path tsFile = Paths.get(segmentFile);
+                    if (completedSet.contains(i) && !Files.exists(tsFile)) {
                         String message = String.format(ERROR_MISSING_SEGMENT, segmentFile);
                         updateState(DownloadState.ERROR, message);
                         throw new IOException(message);
                     }
+                    tsSegments.add(tsFile);
                 }
-                segmentCombiner.combineSegments(outputDir, outputFile, segments.size());
+                segmentCombiner.combineSegments(tsSegments, outputDir, outputFile);
                 updateState(DownloadState.COMPLETED, "");
                 segmentStateManager.cleanupState();
             } else {
@@ -285,7 +289,7 @@ public class HlsMediaProcessor {
      * @return An InputStream containing the processed (decrypted if needed) segment data.
      * @throws IOException If fetching or decryption fails.
      */
-    private InputStream processSegment(HlsParser.Segment segment, int segmentIndex) throws IOException {
+    InputStream processSegment(HlsParser.Segment segment, int segmentIndex) throws IOException {
         if (isCancelled.get() || cancellationRequested.get() || Thread.interrupted()) {
             throw new InterruptedIOException("Download cancelled");
         }
@@ -361,7 +365,7 @@ public class HlsMediaProcessor {
     /**
      * Default implementation of SegmentStateManager using file-based persistence.
      */
-    private static class DefaultSegmentStateManager implements SegmentStateManager {
+    public static class DefaultSegmentStateManager implements SegmentStateManager {
         private final String stateFile;
 
         DefaultSegmentStateManager(String stateFile) {
@@ -402,7 +406,7 @@ public class HlsMediaProcessor {
      * Interface for combining segments into a single output file.
      */
     public interface SegmentCombiner {
-        void combineSegments(String outputDir, String outputFile, int segmentCount) throws IOException;
+        void combineSegments(List<Path> tsSegments, String outputDir, String outputFile) throws IOException;
     }
 
     /**
@@ -410,19 +414,18 @@ public class HlsMediaProcessor {
      */
     private static class DefaultSegmentCombiner implements SegmentCombiner {
         @Override
-        public void combineSegments(String outputDir, String outputFile, int segmentCount) throws IOException {
+        public void combineSegments(List<Path> tsSegments, String outputDir, String outputFile) throws IOException {
             try (FileOutputStream fos = new FileOutputStream(outputFile, true)) {
-                for (int i = 1; i <= segmentCount; i++) {
-                    String segmentFile = outputDir + "/segment_" + i + ".ts";
-                    if (!Files.exists(Paths.get(segmentFile))) continue;
-                    try (FileInputStream fis = new FileInputStream(segmentFile)) {
+                for (Path tsFile : tsSegments) {
+                    if (!Files.exists(tsFile)) continue;
+                    try (FileInputStream fis = new FileInputStream(tsFile.toFile())) {
                         byte[] buffer = new byte[1024];
                         int bytesRead;
                         while ((bytesRead = fis.read(buffer)) != -1) {
                             fos.write(buffer, 0, bytesRead);
                         }
                     }
-                    Files.delete(Paths.get(segmentFile));
+                    Files.delete(tsFile);
                 }
             }
             System.out.println("Combined segments into: " + outputFile);
@@ -439,7 +442,7 @@ public class HlsMediaProcessor {
     /**
      * Default implementation of Decryptor using AES-128-CBC.
      */
-    private static class DefaultDecryptor implements Decryptor {
+    public static class DefaultDecryptor implements Decryptor {
         @Override
         public InputStream decrypt(InputStream encryptedStream, byte[] key, HlsParser.EncryptionInfo encryptionInfo, int segmentIndex) throws IOException, GeneralSecurityException {
             // Initialize AES-128-CBC cipher
@@ -496,12 +499,11 @@ public class HlsMediaProcessor {
     /**
      * Default implementation of Fetcher using basic HTTP downloading.
      */
-    private class DefaultFetcher implements HlsParser.Fetcher {
+    public static class DefaultFetcher implements HlsParser.Fetcher {
         HttpURLConnection connection;
 
         @Override
         public InputStream fetchContent(URI uri) throws IOException {
-            disconnect();
             connection = (HttpURLConnection) uri.toURL().openConnection();
             connection.setRequestMethod("GET");
             connection.setConnectTimeout(10000);
