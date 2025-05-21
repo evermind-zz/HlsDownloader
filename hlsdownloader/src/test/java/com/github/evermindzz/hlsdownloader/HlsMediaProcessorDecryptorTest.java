@@ -11,10 +11,12 @@ import javax.crypto.spec.SecretKeySpec;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
+import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -51,6 +53,8 @@ class HlsMediaProcessorDecryptorTest {
     void testDecryptWithExplicitIv() throws IOException {
         // Test with explicit IV from playlist
         HlsParser.Segment segment = new HlsParser.Segment(URI.create("http://test/segment1.ts"),
+                10,
+                "title",
                 new HlsParser.EncryptionInfo("AES-128", URI.create("https://example.com/key1.key"), "0xabcdefabcdefabcdefabcdefabcdefab"));
         segment.getEncryptionInfo().setKey("1234567890abcdef".getBytes());
 
@@ -68,6 +72,8 @@ class HlsMediaProcessorDecryptorTest {
     void testDecryptWithDefaultIv() throws IOException {
         // Test with default IV (segment index)
         HlsParser.Segment segment = new HlsParser.Segment(URI.create("http://test/segment2.ts"),
+                10,
+                "title",
                 new HlsParser.EncryptionInfo("AES-128", URI.create("https://example.com/key2.key"), null));
         segment.getEncryptionInfo().setKey("fedcba0987654321".getBytes());
 
@@ -80,15 +86,24 @@ class HlsMediaProcessorDecryptorTest {
             assertArrayEquals(expectedData, decryptedData, "Decrypted data should match expected plain data with default IV");
         }
     }
-
+public static String byteArrayToHex(byte[] a) {
+   StringBuilder sb = new StringBuilder(a.length * 2);
+   for(byte b: a)
+      sb.append(String.format("%02x", b));
+   return sb.toString();
+}
     @Test
     void testDecryptWithKeyChange() throws IOException {
         // Test decryption with a key change
         HlsParser.Segment segment1 = new HlsParser.Segment(URI.create("http://test/segment1.ts"),
+                10,
+                "title_segment1",
                 new HlsParser.EncryptionInfo("AES-128", URI.create("https://example.com/key1.key"), "0xabcdefabcdefabcdefabcdefabcdefab"));
         segment1.getEncryptionInfo().setKey("1234567890abcdef".getBytes());
 
         HlsParser.Segment segment2 = new HlsParser.Segment(URI.create("http://test/segment2.ts"),
+                10,
+                "title_segment2",
                 new HlsParser.EncryptionInfo("AES-128", URI.create("https://example.com/key2.key"), "0x12345678123456781234567812345678"));
         segment2.getEncryptionInfo().setKey("fedcba0987654321".getBytes());
 
@@ -111,6 +126,8 @@ class HlsMediaProcessorDecryptorTest {
     void testDecryptWithInvalidKey() {
         // Test with invalid key length
         HlsParser.Segment segment = new HlsParser.Segment(URI.create("http://test/segment1.ts"),
+                10,
+                "title",
                 new HlsParser.EncryptionInfo("AES-128", URI.create("https://example.com/key1.key"), "0xabcdefabcdefabcdefabcdefabcdefab"));
         segment.getEncryptionInfo().setKey("invalid".getBytes()); // 6 bytes, not 16
 
