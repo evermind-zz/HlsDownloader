@@ -320,11 +320,6 @@ class HlsParserTest {
         public InputStream fetchContent(URI uri) throws IOException {
             return new ByteArrayInputStream(content != null ? content.getBytes(StandardCharsets.UTF_8) : new byte[0]);
         }
-
-        @Override
-        public void disconnect() {
-            // No-op for test
-        }
     }
 
     static class DummyCallback implements HlsParser.MasterPlaylistSelectionCallback {
