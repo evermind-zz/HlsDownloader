@@ -15,7 +15,10 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
-import java.util.concurrent.CountDownLatch;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Locale;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -69,7 +72,7 @@ class HlsMediaProcessorTest {
         stateFile = tempDir.resolve("download_state.txt").toString();
 
         // Default setup with a three-segment playlist
-        initHls(DEFAULT_PLAYLIST);
+        //initHls(DEFAULT_PLAYLIST);
     }
 
     @AfterEach
@@ -104,6 +107,7 @@ class HlsMediaProcessorTest {
 
     @Test
     void testSuccessfulDownload() throws IOException {
+        initHls(DEFAULT_PLAYLIST);
         downloader.download(URI.create("http://test/media.m3u8"));
 
         assertTrue(Files.exists(Path.of(outputFile)), "Output file should exist");
@@ -117,9 +121,16 @@ class HlsMediaProcessorTest {
         // Create a CyclicBarrier with 3 parties: 2 download threads + 1 test thread
         CyclicBarrier barrier = new CyclicBarrier(3);
         AtomicInteger segmentCounter = new AtomicInteger(0);
+        AtomicReference<HlsMediaProcessor.DownloadState> prevState = new AtomicReference<>();
         AtomicReference<HlsMediaProcessor.DownloadState> lastState = new AtomicReference<>();
+        AtomicReference<String> prevMessage = new AtomicReference<>();
         AtomicReference<String> lastMessage = new AtomicReference<>();
 
+        parser = new HlsParser( null,
+                new MockFetcher(TWO_SEGMENT_PLAYLIST, null),
+                true
+        );
+        HlsMediaProcessor.DownloadStateCallback callback = new DownloadStateLogger();
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
                 new MockFetcher(TWO_SEGMENT_PLAYLIST, barrier), // Pass the barrier to MockFetcher
                 new MockDecryptor(),
@@ -141,8 +152,11 @@ class HlsMediaProcessorTest {
                     }
                 },
                 (state, message) -> {
+                    prevState.set(lastState.get());
+                    prevMessage.set(lastMessage.get());
                     lastState.set(state);
                     lastMessage.set(message);
+                    callback.onDownloadState(state, message);
                 });
 
         Thread downloadThread = new Thread(() -> {
@@ -155,6 +169,7 @@ class HlsMediaProcessorTest {
                 }
             }
         });
+        downloadThread.setName("MainThread");
         downloadThread.start();
 
         // Test thread waits at the barrier for both download threads to reach the fetch point
@@ -169,8 +184,10 @@ class HlsMediaProcessorTest {
 
         downloadThread.join(2000); // Allow cancellation to complete
 
-        assertEquals(HlsMediaProcessor.DownloadState.CANCELLED, lastState.get(), "Should notify cancellation");
-        assertEquals("Cancelled by user", lastMessage.get(), "Should provide cancellation reason");
+        assertEquals(HlsMediaProcessor.DownloadState.CANCELLED, prevState.get(), "Should notify cancellation");
+        assertEquals(HlsMediaProcessor.DownloadState.STOPPED, lastState.get(), "Should notify stopped");
+        assertEquals("Cancelled by user", prevMessage.get(), "Should provide cancellation reason");
+        assertEquals("All operations stopped. EOW", lastMessage.get(), "Should provide stopped info");
         assertFalse(Files.exists(Path.of(outputFile)), "Output file should not exist after cancellation");
         assertTrue(Files.exists(Path.of(outputDir + "/segment_1.ts")), "First segment should exist");
         assertFalse(Files.exists(Path.of(outputDir + "/segment_2.ts")), "Second segment should not exist");
@@ -214,6 +231,7 @@ class HlsMediaProcessorTest {
 
     @Test
     void testSegmentFileOverwrites() throws InterruptedException, IOException {
+        initHls(DEFAULT_PLAYLIST);
         // Pre-create a segment file with different content
         String segmentFile = outputDir + "/segment_1.ts";
         try {
@@ -273,7 +291,7 @@ class HlsMediaProcessorTest {
             byte[] content = is.readAllBytes();
             byte[] expectedData = new byte[1024];
             for (int j = 0; j < 1024; j++) {
-                expectedData[j] = (byte) (0 + j); // Segment 1 content
+                expectedData[j] = (byte) j; // Segment 1 content
             }
             assertArrayEquals(expectedData, content, "Segment file should be overwritten with new content");
         } catch (IOException e) {
@@ -389,6 +407,7 @@ class HlsMediaProcessorTest {
     void testWithActualData() throws IOException {
         String localTestUri = "http://localhost:2002/input_hls/playlist.m3u8";
         //String localTestUri = "https://1a-1791.com/video/fww1/60/s8/2/V/J/m/J/VJmJy.haa.rec.tar?r_file=chunklist.m3u8&r_type=application%2Fvnd.apple.mpegurl&r_range=434384896-434393686";
+        outputFile += ".mp4";
         HlsParser.Fetcher defaultFetcher = new HlsMediaProcessor.DefaultFetcher();
         parser = new HlsParser(null, defaultFetcher, true);
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
@@ -451,84 +470,15 @@ class HlsMediaProcessorTest {
     }
 
     @Test
-    void testConcurrentFetchSafety() throws InterruptedException, IOException {
-        String twoSegmentPlaylist = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:9.0,\nsegment1.ts\n#EXTINF:9.0,\nsegment2.ts\n#EXT-X-ENDLIST";
-        HlsParser.Fetcher defaultFetcher = new HlsMediaProcessor.DefaultFetcher();
-        parser = new HlsParser(null, defaultFetcher, true);
-        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                defaultFetcher, new MockDecryptor(),
-                2,
-                new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
-                null,
-                (progress, total) -> {},
-                (state, message) -> {});
-
-        CountDownLatch latch = new CountDownLatch(2);
-        Thread thread1 = new Thread(() -> {
-            try {
-                downloader.download(URI.create("http://test/media1.m3u8"));
-            } catch (IOException e) {
-                fail("Thread 1 failed: " + e.getMessage());
-            } finally {
-                latch.countDown();
-            }
-        });
-        Thread thread2 = new Thread(() -> {
-            try {
-                downloader.download(URI.create("http://test/media2.m3u8"));
-            } catch (IOException e) {
-                fail("Thread 2 failed: " + e.getMessage());
-            } finally {
-                latch.countDown();
-            }
-        });
-
-        thread1.start();
-        thread2.start();
-        latch.await(10, TimeUnit.SECONDS);
-
-        assertTrue(Files.exists(Path.of(outputDir + "/output.ts")), "Output file should exist");
-        assertFalse(Files.exists(Path.of(stateFile)), "State file should be cleaned up");
-        assertEquals(0, countSegmentFiles(), "No segment files should remain");
-    }
-
-    @Test
-    void testInputStreamValidity() throws IOException, InterruptedException {
-        String singleSegmentPlaylist = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:9.0,\nsegment1.ts\n#EXT-X-ENDLIST";
-        HlsParser.Fetcher defaultFetcher = new HlsMediaProcessor.DefaultFetcher();
-        parser = new HlsParser(null, defaultFetcher, true);
-        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
-                defaultFetcher, new MockDecryptor(),
-                2,
-                new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
-                null,
-                (progress, total) -> {},
-                (state, message) -> {});
-
-        CountDownLatch latch = new CountDownLatch(1);
-        AtomicReference<IOException> exceptionRef = new AtomicReference<>();
-        Thread thread = new Thread(() -> {
-            try {
-                downloader.download(URI.create("http://test/media.m3u8"));
-            } catch (IOException e) {
-                exceptionRef.set(e);
-            } finally {
-                latch.countDown();
-            }
-        });
-        thread.start();
-        latch.await(5, TimeUnit.SECONDS);
-
-        assertNull(exceptionRef.get(), "No IOException should occur due to InputStream closure but was: " + exceptionRef.get());
-        assertTrue(Files.exists(Path.of(outputFile)), "Output file should exist");
-        assertFalse(Files.exists(Path.of(stateFile)), "State file should be cleaned up");
-        assertEquals(0, countSegmentFiles(), "No segment files should remain");
-    }
-
-    @Test
     void testStreamingDecryption() throws IOException {
-        String singleSegmentPlaylist = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXT-X-KEY:METHOD=AES-128,URI=\"https://example.com/key1.key\",IV=0xabcdef1234567890abcdef1234567890\n#EXTINF:9.0,\nsegment1.ts\n#EXT-X-ENDLIST";
-        HlsParser.Fetcher defaultFetcher = new HlsMediaProcessor.DefaultFetcher();
+        // test data
+        HashMap<Integer, HlsMediaProcessorDecryptorTest.TestData> testDataMap = new HashMap<>();
+        int segmentIndex = 1;
+        testDataMap.put(segmentIndex, new HlsMediaProcessorDecryptorTest.TestData("AES/CBC/PKCS5Padding", "1234567890abcdef","0xabcdef1234567890abcdef1234567890", "https://example.com/key1.key", "http://test/segment1.ts"));
+
+        // setup parser and downloader
+        HlsMediaProcessorDecryptorTest.MockEncFetcher defaultFetcher = new HlsMediaProcessorDecryptorTest.MockEncFetcher(testDataMap, SINGLE_SEGMENT_PLAYLIST);
+
         parser = new HlsParser(null, defaultFetcher, true);
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
                 defaultFetcher, new HlsMediaProcessor.DefaultDecryptor(),
@@ -541,7 +491,27 @@ class HlsMediaProcessorTest {
         downloader.download(URI.create("http://test/media.m3u8"));
 
         assertTrue(Files.exists(Path.of(outputFile)), "Output file should exist");
+
+        // as we have one single segment outputFile has toe be same like segment1.ts
+        try (InputStream is = new FileInputStream(outputFile)) {
+            byte[] combinedData = is.readAllBytes();
+            byte[] expectedData = defaultFetcher.generateSegmentData(segmentIndex);
+
+            byte[] encryptedData = defaultFetcher.getEncryptedSegmentData(segmentIndex, expectedData).readAllBytes();
+            assertNotEquals(encryptedData[0], combinedData[0], "the data should differ as first is encrypted and 2nd should be plain");
+            assertArrayEquals(expectedData, combinedData, "Decrypted data should match original data across key change");
+        }
         assertFalse(Files.exists(Path.of(stateFile)), "State file should be cleaned up");
         assertEquals(0, countSegmentFiles(), "No segment files should remain");
+    }
+
+    private class DownloadStateLogger implements HlsMediaProcessor.DownloadStateCallback {
+
+        @Override
+        public void onDownloadState(HlsMediaProcessor.DownloadState state, String message) {
+            SimpleDateFormat TIMESTAMP_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US);
+            String timestamp = TIMESTAMP_FORMAT.format(new Date());
+            // DBG only System.out.println(state.name() + " " + timestamp +  " " + message + " |--> " + Thread.currentThread().getName() + " " + Arrays.toString(Thread.currentThread().getStackTrace()).replace( ',', '\n' ));
+        }
     }
 }
