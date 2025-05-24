@@ -535,12 +535,12 @@ public class HlsMediaProcessor {
     }
 
     /**
-     * Default implementation of Decryptor using AES-128-CBC with streaming decryption.
+     * Default implementation of Decryptor using AES-128-CBC with streaming decryption and PKCS#7 padding.
      */
     public static class DefaultDecryptor implements Decryptor {
         @Override
         public InputStream decrypt(InputStream encryptedStream, byte[] key, HlsParser.EncryptionInfo encryptionInfo, int segmentIndex) throws IOException, GeneralSecurityException {
-            Cipher cipher = Cipher.getInstance("AES/CBC/NoPadding");
+            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding"); // Updated to use PKCS#7 padding
             byte[] iv = parseIv(encryptionInfo.getIv(), segmentIndex);
             SecretKeySpec keySpec = new SecretKeySpec(key, "AES");
             IvParameterSpec ivSpec = new IvParameterSpec(iv);
