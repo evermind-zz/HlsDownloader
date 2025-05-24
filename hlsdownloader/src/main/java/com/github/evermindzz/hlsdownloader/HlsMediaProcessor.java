@@ -50,7 +50,7 @@ public class HlsMediaProcessor {
 
     // Enum for download states
     public enum DownloadState {
-        STARTED, PAUSED, RESUMED, CANCELLED, COMPLETED, ERROR
+        STARTED, PAUSED, RESUMED, CANCELLED, COMPLETED, ERROR, STOPPED
     }
 
     // Error message constants
@@ -126,9 +126,9 @@ public class HlsMediaProcessor {
         } finally {
             cleanupExecutor();
             if (isDownloadCancelled()) {
-                segmentStateManager.cleanupState();
                 updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
             }
+            updateState(DownloadState.STOPPED, "All operations stopped. EOW");
         }
     }
 
@@ -410,8 +410,10 @@ public class HlsMediaProcessor {
      * @param message The message associated with the state change.
      */
     private void updateState(DownloadState state, String message) {
-        currentState.set(state);
-        stateCallback.onDownloadState(state, message);
+        DownloadState previousState = currentState.getAndSet(state);
+        if (previousState != state) {
+            stateCallback.onDownloadState(state, message);
+        }
     }
 
     /**
