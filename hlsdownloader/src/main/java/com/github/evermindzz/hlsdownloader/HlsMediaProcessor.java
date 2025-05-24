@@ -11,6 +11,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -65,6 +66,8 @@ public class HlsMediaProcessor {
 
     private static final boolean DEBUG = false;
 
+    private static final int MAX_DOWNLOAD_RETRIES = 3;
+    private static final int DOWNLOAD_RETRY_DELAY_MS = 1000;
     /**
      * Constructs a new HlsMediaProcessor.
      *
@@ -176,7 +179,7 @@ public class HlsMediaProcessor {
             }
         }
         for (HlsParser.EncryptionInfo encryptionInfo : uniqueEncryptionInfos) {
-            try (InputStream keyStream = fetcher.fetchContent(encryptionInfo.getUri())) {
+            try (InputStream keyStream = callFetchContent(encryptionInfo.getUri())) {
                 byte[] key = keyStream.readAllBytes();
                 if (key.length != 16) {
                     throw new IOException("Invalid key length: expected 16 bytes, got " + key.length);
@@ -337,6 +340,36 @@ public class HlsMediaProcessor {
         return isCancelled.get() || cancellationRequested.get() || Thread.interrupted();
     }
 
+    private InputStream callFetchContent(URI uri) throws IOException{
+        int attempt = 0;
+        InputStream stream = null;
+        while (attempt < MAX_DOWNLOAD_RETRIES) {
+            try {
+                System.out.println("Fetching URI: " + uri + " (Attempt " + (attempt + 1) + ")");
+                stream = fetcher.fetchContent(uri);
+                break;
+            } catch (SocketException | SocketTimeoutException e) {
+                System.err.println(e.getClass().getSimpleName() + " while fetching " + uri + ": " + e.getMessage());
+                attempt++;
+
+                if (attempt == MAX_DOWNLOAD_RETRIES) {
+                    throw e;
+                }
+
+                // sleep before retry
+                try {
+                    int delay = DOWNLOAD_RETRY_DELAY_MS * (1 << attempt); // Exponential backoff: 1s, 2s, 4s
+                    Thread.sleep(delay);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted during retry delay", ie);
+                }
+            }
+        }
+
+        return stream;
+    }
+
     /**
      * Processes a segment by fetching its content and decrypting it if necessary.
      *
@@ -349,7 +382,9 @@ public class HlsMediaProcessor {
         if (isDownloadCancelled()) {
             throw new DownloadCancelledException("Download cancelled");
         }
-        InputStream originalStream = fetcher.fetchContent(segment.getUri());
+
+        InputStream originalStream = callFetchContent(segment.getUri());
+
         if (isDownloadCancelled()) {
             throw new DownloadCancelledException("Download cancelled during fetch");
         }
@@ -541,37 +576,15 @@ public class HlsMediaProcessor {
      */
     public static class DefaultFetcher implements HlsParser.Fetcher {
         private static final int MAX_RETRIES = 3;
-        private static final int RETRY_DELAY_MS = 1000;
 
         @Override
         public InputStream fetchContent(URI uri) throws IOException {
-            int attempt = 0;
-            while (attempt < MAX_RETRIES) {
-                HttpURLConnection connection = null;
-                try {
-                    System.out.println("Fetching URI: " + uri + " (Attempt " + (attempt + 1) + ")");
-                    connection = (HttpURLConnection) uri.toURL().openConnection();
-                    connection.setRequestMethod("GET");
-                    connection.setConnectTimeout(10000);
-                    connection.setReadTimeout(10000);
-                    return connection.getInputStream();
-                } catch (SocketException e) {
-                    System.err.println("SocketException while fetching " + uri + ": " + e.getMessage());
-                    attempt++;
-                    if (attempt >= MAX_RETRIES) {
-                        throw new IOException("Failed to fetch " + uri + " after " + MAX_RETRIES + " attempts: " + e.getMessage(), e);
-                    }
-                    try {
-                        Thread.sleep(RETRY_DELAY_MS);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        throw new IOException("Interrupted during retry delay", ie);
-                    }
-                } catch (IOException e) {
-                    throw e;
-                }
-            }
-            throw new IOException("Unexpected failure after retries for URI: " + uri);
+            HttpURLConnection connection = null;
+            connection = (HttpURLConnection) uri.toURL().openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(10000);
+            connection.setReadTimeout(10000);
+            return connection.getInputStream();
         }
     }
 
