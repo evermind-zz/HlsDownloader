@@ -217,7 +217,7 @@ public class HlsMediaProcessor {
                     Path segmentFile = getSegmentFileName(index);
                     try (InputStream in = processSegment(segment, index)) {
                         if (isDownloadCancelled()) {
-                            throw new InterruptedIOException("Download cancelled during I/O");
+                            throw new DownloadCancelledException("Download cancelled during I/O");
                         }
                         Files.copy(in, segmentFile, StandardCopyOption.REPLACE_EXISTING);
                     }
@@ -228,7 +228,7 @@ public class HlsMediaProcessor {
                     int currentProgress = progress.incrementAndGet();
                     progressCallback.onProgressUpdate(currentProgress, segments.size());
                     if (isDownloadCancelled()) {
-                        throw new InterruptedIOException("Download cancelled after progress");
+                        throw new DownloadCancelledException("Download cancelled after progress");
                     }
                 } catch (IOException e) {
                     throw new RuntimeException("Failed to process segment " + (index + 1), e);
@@ -295,19 +295,20 @@ public class HlsMediaProcessor {
     private void handleDownloadException(Exception e) throws IOException {
         if (e instanceof CompletionException) {
             CompletionException ce = (CompletionException) e;
-            if (ce.getCause() instanceof InterruptedIOException) {
+            if (ce.getCause() instanceof DownloadCancelledException) {
                 printStackTraces("instanceof InterruptException", ce);
                 segmentStateManager.cleanupState();
                 updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
-            } else if (ce.getCause() instanceof RuntimeException && ce.getCause().getCause() instanceof IOException) {
-                printStackTraces("wrapped IOException", ce.getCause().getCause());
-                IOException ioException = (IOException) ce.getCause().getCause();
-                updateState(DownloadState.ERROR, ioException.getMessage());
-                throw ioException;
+            } else if (ce.getCause() instanceof RuntimeException && ce.getCause().getCause() instanceof DownloadCancelledException) {
+                printStackTraces("wrapped DownloadCancelledException", ce.getCause().getCause());
+                updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
             } else if (ce.getCause() instanceof InterruptedException) {
                 printStackTraces("instanceof InterruptedException", ce.getCause());
                 segmentStateManager.cleanupState();
                 updateState(DownloadState.CANCELLED, MESSAGE_INTERRUPTED);
+            } else if (ce.getCause() instanceof RuntimeException && null != ce.getCause().getCause()) {
+                // we have another wrapped one here --> unwrap and rethrow as IOException
+               throw new IOException(ce.getCause().getCause());
             } else {
                 printStackTraces("CompletionException", ce.getCause());
                 updateState(DownloadState.ERROR, ce.getCause().getMessage());
@@ -346,11 +347,11 @@ public class HlsMediaProcessor {
      */
     InputStream processSegment(HlsParser.Segment segment, int segmentIndex) throws IOException {
         if (isDownloadCancelled()) {
-            throw new InterruptedIOException("Download cancelled");
+            throw new DownloadCancelledException("Download cancelled");
         }
         InputStream originalStream = fetcher.fetchContent(segment.getUri());
         if (isDownloadCancelled()) {
-            throw new InterruptedIOException("Download cancelled during fetch");
+            throw new DownloadCancelledException("Download cancelled during fetch");
         }
         if (segment.getEncryptionInfo() != null) {
             byte[] key = segment.getEncryptionInfo().getKey();
@@ -584,5 +585,12 @@ public class HlsMediaProcessor {
      */
     public interface DownloadStateCallback {
         void onDownloadState(DownloadState state, String message);
+    }
+
+    private static class DownloadCancelledException extends  InterruptedIOException {
+
+        public DownloadCancelledException(String msg) {
+            super(msg);
+        }
     }
 }
