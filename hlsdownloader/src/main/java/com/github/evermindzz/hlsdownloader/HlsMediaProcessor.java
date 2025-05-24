@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.security.GeneralSecurityException;
+import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -61,6 +62,8 @@ public class HlsMediaProcessor {
     private static final String ERROR_DECRYPTION_FAILED = "Decryption failed: %s";
     private static final String MESSAGE_CANCELLED_BY_USER = "Cancelled by user";
     private static final String MESSAGE_INTERRUPTED = "Interrupted: %s";
+
+    private static final boolean DEBUG = false;
 
     /**
      * Constructs a new HlsMediaProcessor.
@@ -132,8 +135,10 @@ public class HlsMediaProcessor {
     private void initializeState() throws IOException {
         Set<Integer> completedIndices = segmentStateManager.loadState();
         segmentStateManager.saveState(completedIndices); // Initial save to ensure file exists
+        AtomicInteger threadId = new AtomicInteger();
         executor = Executors.newFixedThreadPool(numThreads, r -> {
             Thread t = new Thread(r);
+            t.setName("DownloaderNo-" + threadId.getAndIncrement());
             t.setUncaughtExceptionHandler((thread, ex) -> {
                 System.err.println("Thread " + thread.getName() + " terminated with exception: " + ex.getMessage());
                 ex.printStackTrace();
@@ -276,24 +281,40 @@ public class HlsMediaProcessor {
         }
     }
 
+    void printStackTraces(String custom, Throwable e) {
+        if (DEBUG) {
+            SimpleDateFormat TIMESTAMP_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US);
+            String timestamp = TIMESTAMP_FORMAT.format(new Date());
+            System.out.println("### " + timestamp + " "
+                    + custom + " >NAME:" + e.getClass().getSimpleName() + " >MSG:" + e.getMessage() + " >CAUSE: " + e.getCause()
+                    + " |--> " + Thread.currentThread().getName() + " " + Arrays.toString(Thread.currentThread().getStackTrace()).replace(',', '\n')
+                    + " |--> exceptionBacktrace " + Arrays.toString(e.getStackTrace()).replace(',', '\n'));
+        }
+    }
+
     private void handleDownloadException(Exception e) throws IOException {
         if (e instanceof CompletionException) {
             CompletionException ce = (CompletionException) e;
             if (ce.getCause() instanceof InterruptedIOException) {
+                printStackTraces("instanceof InterruptException", ce);
                 segmentStateManager.cleanupState();
                 updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
             } else if (ce.getCause() instanceof RuntimeException && ce.getCause().getCause() instanceof IOException) {
+                printStackTraces("wrapped IOException", ce.getCause().getCause());
                 IOException ioException = (IOException) ce.getCause().getCause();
                 updateState(DownloadState.ERROR, ioException.getMessage());
                 throw ioException;
             } else if (ce.getCause() instanceof InterruptedException) {
+                printStackTraces("instanceof InterruptedException", ce.getCause());
                 segmentStateManager.cleanupState();
                 updateState(DownloadState.CANCELLED, MESSAGE_INTERRUPTED);
             } else {
+                printStackTraces("CompletionException", ce.getCause());
                 updateState(DownloadState.ERROR, ce.getCause().getMessage());
                 throw new IOException(ce.getCause());
             }
-        } else {
+        } else { // unhandled Exception
+            printStackTraces("UnknownException", e.getCause());
             throw new IOException(e);
         }
     }
