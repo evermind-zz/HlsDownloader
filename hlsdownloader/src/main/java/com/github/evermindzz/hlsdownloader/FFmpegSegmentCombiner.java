@@ -4,18 +4,11 @@ import com.github.evermindzz.legacyfilesutils.Files;
 import com.github.evermindzz.legacyfilesutils.Files.StandardOpenOption;
 import com.github.evermindzz.legacyfilesutils.Paths;
 
-import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.ToIntFunction;
 
 /**
  * A segment combiner implementation that uses FFmpeg to concatenate .ts files into a single output file.
@@ -24,8 +17,15 @@ import java.util.concurrent.atomic.AtomicReference;
  * detect inactivity and terminates the process if no progress is made within a specified time.
  */
 public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner {
-    private static final long INACTIVITY_THRESHOLD_SECONDS = 30; // Terminate if no output for 30 seconds
-    private static final int LOG_EXECUTOR_TIMEOUT_SECONDS = 1;   // Timeout for log executor shutdown
+    private final ToIntFunction<String[]> executor;
+
+    /**
+     * Create a ts segments combiner using FFmpeg.
+     * @param executor the function that runs tbe ffmpeg binary.
+     */
+    public FFmpegSegmentCombiner(ToIntFunction<String[]> executor) {
+        this.executor = executor;
+    }
 
     /**
      * Combines a list of .ts segment files into a single output file using FFmpeg.
@@ -37,7 +37,6 @@ public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner 
      *                   The extension determines the container format (e.g., .mp4, .mkv, .ts).
      *                   Ensure FFmpeg supports the chosen format with stream copying (-c copy).
      * @throws IOException            If file operations or FFmpeg execution fails.
-     * @throws FFmpegCombinationException If the FFmpeg process is interrupted, times out, or stalls.
      */
     @Override
     public void combineSegments(List<File> tsSegments, String outputDir, String outputFile) throws IOException {
@@ -45,22 +44,8 @@ public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner 
             throw new IllegalArgumentException("Segment list cannot be null or empty");
         }
 
-        try {
-            combineTsToContainer(tsSegments, outputDir, outputFile);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt(); // Restore interrupted status
-            throw new FFmpegCombinationException("FFmpeg combination interrupted", e);
-        }
+        combineTsToContainer(tsSegments, outputDir, outputFile);
         System.out.println("Combined segments into: " + outputFile); // Log completion
-    }
-
-    /**
-     * Custom exception for FFmpeg-related combination failures.
-     */
-    private static class FFmpegCombinationException extends RuntimeException {
-        FFmpegCombinationException(String message, Throwable cause) {
-            super(message, cause);
-        }
     }
 
     /**
@@ -86,87 +71,28 @@ public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner 
     /**
      * Executes FFmpeg to combine the .ts files into a single output file without re-encoding.
      * The output container format is determined by the extension of the output file (e.g., .mp4, .mkv, .ts).
-     * Monitors FFmpeg output to detect inactivity and terminates the process if no progress
-     * is made within {@link #INACTIVITY_THRESHOLD_SECONDS}.
      *
      * @param tsFiles   List of File objects for the .ts input files, ordered for playback.
      * @param outputDir Directory for temporary files and the output file.
      * @param outputFile The full path (including filename and extension) of the resulting file.
      * @throws IOException          If FFmpeg execution or file operations fail.
-     * @throws InterruptedException If the FFmpeg process is interrupted.
      */
-    private void combineTsToContainer(List<File> tsFiles, String outputDir, String outputFile)
-            throws IOException, InterruptedException {
-        // Create concat list file
-        File concatList = createConcatListFile(tsFiles, outputDir);
-        Process process = null;
-        try (ExecutorService logExecutor = Executors.newSingleThreadExecutor()) {
-            AtomicReference<Instant> lastOutputTime = new AtomicReference<>(Instant.now());
-            try {
-                // Configure FFmpeg process
-                ProcessBuilder builder = new ProcessBuilder(
-                        "ffmpeg",
-                        "-f", "concat",
-                        "-safe", "0",
-                        "-i", concatList.getAbsolutePath(),
-                        "-c", "copy", // Copy streams without re-encoding
-                        "-y",        // Overwrite output file if it exists
-                        outputFile
-                );
-                builder.redirectErrorStream(true); // Merge stdout and stderr for logging
-                process = builder.start();
-
-                // Asynchronously log FFmpeg output and monitor inactivity
-                Process finalProcess = process;
-                logExecutor.submit(() -> {
-                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(finalProcess.getInputStream()))) {
-                        String line;
-                        while ((line = reader.readLine()) != null) {
-                            System.out.println("[FFmpeg] " + line); // Log output
-                            lastOutputTime.set(Instant.now());     // Update last output time
-                        }
-                    } catch (IOException e) {
-                        System.err.println("Error reading FFmpeg output: " + e.getMessage());
-                    }
-                });
-
-                // Watchdog to check for inactivity
-                Instant start = Instant.now();
-                while (process.isAlive()) {
-                    Duration inactivityDuration = Duration.between(lastOutputTime.get(), Instant.now());
-                    if (inactivityDuration.getSeconds() > INACTIVITY_THRESHOLD_SECONDS) {
-                        System.err.println("FFmpeg stalled for " + INACTIVITY_THRESHOLD_SECONDS + " seconds, terminating...");
-                        process.destroyForcibly();
-                        throw new FFmpegCombinationException("FFmpeg stalled due to inactivity", null);
-                    }
-                    Thread.sleep(1000); // Check every second
-                }
-
-                // Measure execution time
-                Duration duration = Duration.between(start, Instant.now());
-                System.out.println("FFmpeg execution took " + duration.toMillis() + " ms");
-
-                // Check exit code after process completes
-                int exitCode = process.exitValue();
-                if (exitCode != 0) {
-                    throw new IOException("FFmpeg failed with exit code: " + exitCode);
-                }
-            } finally {
-                // Clean up process and temp file
-                if (process != null) {
-                    process.destroyForcibly(); // Ensure process is terminated
-                }
-                logExecutor.shutdown();
-                try {
-                    logExecutor.awaitTermination(LOG_EXECUTOR_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                try {
-                    Files.deleteIfExists(concatList);
-                } catch (IOException e) {
-                    System.err.println("Failed to delete temp concat file: " + concatList + ", " + e.getMessage());
-                }
+    private void combineTsToContainer(List<File> tsFiles, String outputDir, String outputFile) throws IOException {
+        File concatList = null;
+        try {
+            // Create concat list file
+            concatList = createConcatListFile(tsFiles, outputDir);
+            executor.applyAsInt(new String[]{
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", concatList.getAbsolutePath(),
+                    "-c", "copy", // Copy streams without re-encoding
+                    "-y",        // Overwrite output file if it exists
+                    outputFile
+            });
+        } finally {
+            if (null != concatList) {
+                Files.deleteIfExists(concatList);
             }
         }
     }

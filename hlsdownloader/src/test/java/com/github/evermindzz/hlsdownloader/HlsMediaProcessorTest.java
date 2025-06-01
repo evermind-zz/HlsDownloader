@@ -405,6 +405,8 @@ class HlsMediaProcessorTest {
 
     // disabled @Test
     void testWithActualData() throws IOException {
+
+        RunBinary runBinary = new RunBinary("ffmpeg", "ffmpeg");
         String localTestUri = "http://localhost:2002/input_hls/playlist.m3u8";
         //String localTestUri = "https://1a-1791.com/video/fww1/60/s8/2/V/J/m/J/VJmJy.haa.rec.tar?r_file=chunklist.m3u8&r_type=application%2Fvnd.apple.mpegurl&r_range=434384896-434393686";
         outputFile += ".mp4";
@@ -414,7 +416,13 @@ class HlsMediaProcessorTest {
                 defaultFetcher, null,
                 2,
                 new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
-                new FFmpegSegmentCombiner(),
+                new FFmpegSegmentCombiner(args -> {
+                    try {
+                        return runBinary.execute(args);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                }),
                 (progress, total) -> {},
                 (state, message) -> {}, false);
 
