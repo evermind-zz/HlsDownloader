@@ -51,7 +51,7 @@ class HlsMediaProcessorDecryptorTest {
                 (downloadFetcher != null ? downloadFetcher : new MockEncFetcher()),
                 new HlsMediaProcessor.DefaultDecryptor(),
                 1, new HlsMediaProcessor.DefaultSegmentStateManager(outputDir + "/download_state.txt"),
-                null, (progress, total) -> {}, (state, message) -> {});
+                null, (progress, total) -> {}, (state, message) -> {}, false);
     }
 
     @AfterEach

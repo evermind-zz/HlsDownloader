@@ -102,7 +102,7 @@ class HlsMediaProcessorTest {
                 new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
                 null, // Use default SegmentCombiner
                 (progress, total) -> {},
-                (state, message) -> {});
+                (state, message) -> {}, false);
     }
 
     @Test
@@ -157,7 +157,7 @@ class HlsMediaProcessorTest {
                     lastState.set(state);
                     lastMessage.set(message);
                     callback.onDownloadState(state, message);
-                });
+                }, false);
 
         Thread downloadThread = new Thread(() -> {
             try {
@@ -263,7 +263,7 @@ class HlsMediaProcessorTest {
                         downloader.cancel(); // Cancel the download
                     }
                 },
-                (state, message) -> {});
+                (state, message) -> {}, false);
 
         Thread downloadThread = new Thread(() -> {
             try {
@@ -316,7 +316,7 @@ class HlsMediaProcessorTest {
                 (state, message) -> {
                     lastState.set(state);
                     lastMessage.set(message);
-                });
+                }, false);
 
         try {
             downloader.download(URI.create("http://test/media.m3u8"));
@@ -416,7 +416,7 @@ class HlsMediaProcessorTest {
                 new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
                 new FFmpegSegmentCombiner(),
                 (progress, total) -> {},
-                (state, message) -> {});
+                (state, message) -> {}, false);
 
         downloader.download(URI.create(localTestUri));
 
@@ -486,7 +486,7 @@ class HlsMediaProcessorTest {
                 new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
                 null,
                 (progress, total) -> {},
-                (state, message) -> {});
+                (state, message) -> {}, false);
 
         downloader.download(URI.create("http://test/media.m3u8"));
 

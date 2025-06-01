@@ -44,6 +44,7 @@ public class HlsMediaProcessor {
     private final HlsParser.Fetcher fetcher;
     private final Decryptor decryptor;
     private final int numThreads;
+    private final boolean doCleanupSegments;
     private MediaPlaylist playlist; // Store playlist for resuming
     private ExecutorService executor;
     private CountDownLatch pauseLatch; // For pausing threads
@@ -81,6 +82,7 @@ public class HlsMediaProcessor {
      * @param segmentCombiner           Handles combining segments.
      * @param progressCallback          Callback for download progress updates.
      * @param stateCallback             Callback for download state changes.
+     * @param doCleanupSegments         cleanup the downloaded segments files.
      */
     public HlsMediaProcessor(HlsParser parser,
                          String outputDir,
@@ -91,7 +93,8 @@ public class HlsMediaProcessor {
                          SegmentStateManager segmentStateManager,
                          SegmentCombiner segmentCombiner,
                          DownloadProgressCallback progressCallback,
-                         DownloadStateCallback stateCallback) {
+                         DownloadStateCallback stateCallback,
+                         boolean doCleanupSegments) {
         this.parser = parser;
         this.outputDir = outputDir;
         this.outputFile = outputFile;
@@ -107,6 +110,7 @@ public class HlsMediaProcessor {
         this.isPaused = new AtomicBoolean(false);
         this.cancellationRequested = new AtomicBoolean(false);
         this.currentState = new AtomicReference<>(DownloadState.STARTED);
+        this.doCleanupSegments = doCleanupSegments;
     }
 
     /**
@@ -279,8 +283,20 @@ public class HlsMediaProcessor {
                 tsSegments.add(segmentFile);
             }
             segmentCombiner.combineSegments(tsSegments, outputDir, outputFile);
+            if (doCleanupSegments) {
+                cleanupSegmentsFiles(segments);
+            }
             updateState(DownloadState.COMPLETED, "");
             segmentStateManager.cleanupState();
+        }
+    }
+
+    public void cleanupSegmentsFiles(List<Segment> segments) {
+        for (int i = 0; i < segments.size(); i++) {
+            File segmentFile = getSegmentFileName(i);
+            if (Files.exists(segmentFile)) {
+               Files.delete(segmentFile);
+            }
         }
     }
 
