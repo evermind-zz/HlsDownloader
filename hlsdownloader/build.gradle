@@ -16,6 +16,12 @@ dependencies {
     testRuntimeOnly libs.junit.jupiter.engine
     testImplementation libs.junit.jupiter.params
 }
+
+java {
+    withSourcesJar()
+    withJavadocJar()
+}
+
 test {
     useJUnitPlatform()
 }
