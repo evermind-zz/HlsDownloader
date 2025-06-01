@@ -3,6 +3,7 @@ package com.github.evermindzz.hlsdownloader.parser;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.Serializable;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -328,13 +329,15 @@ public class HlsParser {
     /**
      * Represents a single segment in a media playlist.
      */
-    public static class Segment {
-        URI uri;
-        double duration;
-        String title;
-        EncryptionInfo encryptionInfo;
-        Map<String, String> byteRange;
-        String programDateTime;
+    public static class Segment implements Serializable {
+        private static final long serialVersionUID = 1L;
+
+        private URI uri;
+        private double duration;
+        private String title;
+        private EncryptionInfo encryptionInfo;
+        private Map<String, String> byteRange;
+        private String programDateTime;
 
         public Segment(URI uri, double duration, String title, EncryptionInfo encryptionInfo) {
             this.uri = uri;
@@ -381,10 +384,12 @@ public class HlsParser {
     /**
      * Represents encryption information for a segment.
      */
-    public static class EncryptionInfo {
-        public String method;
-        public URI uri;
-        public String iv;
+    public static class EncryptionInfo implements Serializable {
+        private static final long serialVersionUID = 1L;
+
+        private String method;
+        private URI uri;
+        private String iv;
         private byte[] key; // Added for caching the key
 
         public EncryptionInfo(String method, URI uri, String iv) {
