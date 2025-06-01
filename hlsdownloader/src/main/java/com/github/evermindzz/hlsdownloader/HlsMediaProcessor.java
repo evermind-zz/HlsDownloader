@@ -50,6 +50,7 @@ public class HlsMediaProcessor {
     private ExecutorService executor;
     private CountDownLatch pauseLatch; // For pausing threads
     private AtomicReference<DownloadState> currentState; // Track current state
+    private List<Segment> segments;
 
     // Enum for download states
     public enum DownloadState {
@@ -70,6 +71,8 @@ public class HlsMediaProcessor {
 
     private static final int MAX_DOWNLOAD_RETRIES = 3;
     private static final int DOWNLOAD_RETRY_DELAY_MS = 1000;
+
+    private static final int UNUSED_INDEX = -1;
     /**
      * Constructs a new HlsMediaProcessor.
      *
@@ -116,19 +119,25 @@ public class HlsMediaProcessor {
 
     /**
      * Downloads the HLS media playlist and its segments, with support for multi-threading.
+     * <p>
+     * This method is what you usually want to use. It will download the playlist and all
+     * the segments mentioned in the playlist. There are other methods marked 'Step mode method'.
+     * that can be if you just want segment meta data or the like.
      *
-     * @param uri The URI of the HLS playlist.
+     * @param uri          media HLS playlist URI. If URI is master Playlists make sure HlsParser
+     *                     has {@link HlsParser.MasterPlaylistSelectionCallback} to select media playlist.
      * @throws IOException If an I/O error occurs during download, parsing, or state management.
      */
     public void download(URI uri) throws IOException {
         initializeState();
         List<Segment> segments = parsePlaylist(uri);
         fetchEncryptionKeys(segments);
+        this.segments = segments;
         createOutputDirectory();
 
         try {
-            downloadSegments(segments);
-            finalizeDownload(segments);
+            downloadSegments();
+            finalizeDownload();
         } catch (Exception e) {
             handleDownloadException(e);
         } finally {
@@ -139,6 +148,29 @@ public class HlsMediaProcessor {
             updateState(DownloadState.STOPPED, "All operations stopped. EOW");
         }
     }
+
+    /**
+     * Step mode method: parse a media playlist URL and get all segments meta data.
+     *
+     * @param uri         media playlist uri. If Uri is master Playlists make sure HlsParser has
+     *                    {@link HlsParser.MasterPlaylistSelectionCallback} to select media playlist.
+     * @return the parsed segment meta data of the playlist.
+     * @throws IOException on I/O work
+     */
+    public List<Segment> getPlayListSegmentData(URI uri) throws IOException {
+        return parsePlaylist(uri);
+    }
+
+    /**
+     * Step mode method: retrieve encryption keys for given segments if needed.
+     *
+     * @param segments     the segments you want to retrieve the encryption keys for.
+     * @throws IOException on I/O work
+     */
+    public void retrieveEncryptionKeys(List<Segment> segments) throws IOException {
+        fetchEncryptionKeys(segments);
+    }
+
 
     private void initializeState() throws IOException {
         Set<Integer> completedIndices = segmentStateManager.loadState();
@@ -208,7 +240,8 @@ public class HlsMediaProcessor {
         }
     }
 
-    private void downloadSegments(List<Segment> segments) throws IOException {
+    private void downloadSegments() throws IOException {
+        checkIfSegmentsAvailable();
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         ConcurrentSkipListSet<Integer> completedSet = new ConcurrentSkipListSet<>(segmentStateManager.loadState());
         AtomicInteger progress = new AtomicInteger(completedSet.size());
@@ -251,6 +284,12 @@ public class HlsMediaProcessor {
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
     }
 
+    private void checkIfSegmentsAvailable() {
+       if (null == segments) {
+          throw new RuntimeException("please set segments before. Use setSegments()");
+       }
+    }
+
     private File getSegmentFileName(int index) {
         return Paths.get(outputDir + "/segment_" + (index + 1) + ".ts");
     }
@@ -266,7 +305,12 @@ public class HlsMediaProcessor {
         }
     }
 
-    private void finalizeDownload(List<Segment> segments) throws IOException {
+    /**
+     * Step mode method: Finalize the download aka postprocessing via {@link SegmentCombiner} and cleanup.
+     * @throws IOException on I/O work
+     */
+    public void finalizeDownload() throws IOException {
+        checkIfSegmentsAvailable();
         if (isDownloadCancelled()) {
             segmentStateManager.cleanupState();
             updateState(DownloadState.CANCELLED, MESSAGE_CANCELLED_BY_USER);
@@ -285,14 +329,14 @@ public class HlsMediaProcessor {
             }
             segmentCombiner.combineSegments(tsSegments, outputDir, outputFile);
             if (doCleanupSegments) {
-                cleanupSegmentsFiles(segments);
+                cleanupSegmentsFiles();
             }
             updateState(DownloadState.COMPLETED, "");
             segmentStateManager.cleanupState();
         }
     }
 
-    public void cleanupSegmentsFiles(List<Segment> segments) {
+    public void cleanupSegmentsFiles() {
         for (int i = 0; i < segments.size(); i++) {
             File segmentFile = getSegmentFileName(i);
             if (Files.exists(segmentFile)) {
@@ -357,7 +401,7 @@ public class HlsMediaProcessor {
         return isCancelled.get() || cancellationRequested.get() || Thread.interrupted();
     }
 
-    private InputStream callFetchContent(URI uri) throws IOException{
+    private InputStream callFetchContent(URI uri, int segmentIndex) throws IOException{
         int attempt = 0;
         InputStream stream = null;
         while (attempt < MAX_DOWNLOAD_RETRIES) {
@@ -388,22 +432,66 @@ public class HlsMediaProcessor {
     }
 
     /**
-     * Processes a segment by fetching its content and decrypting it if necessary.
-     *
-     * @param segment The segment to process.
-     * @param segmentIndex The index of the segment in the playlist.
-     * @return An InputStream containing the processed (decrypted if needed) segment data.
-     * @throws IOException If fetching or decryption fails.
+     * Step mode method: set the segments. Useful only in combination with the other 'Step mode methods'.
+     * @param segments the segments you want to work with.
      */
-    InputStream processSegment(HlsParser.Segment segment, int segmentIndex) throws IOException {
+    public void setSegments(List<HlsParser.Segment> segments) {
+        this.segments = segments;
+    }
+
+    /**
+     * Step mode method: process all segments that are available.
+     * <p>
+     * The processed segments are stored in {@link HlsMediaProcessor#outputDir}.
+     * @param inputStreamProvider the stream for the segments.
+     */
+    public void processSegments(InputStreamProvider inputStreamProvider) {
+        for (int i = 0; i < segments.size(); i++) {
+            HlsParser.Segment segment = segments.get(i);
+            try {
+                File segmentFile = getSegmentFileName(i);
+                try (InputStream in = processSegment(segment, i, inputStreamProvider)) {
+                    Files.copy(in, segmentFile, StandardCopyOption.REPLACE_EXISTING);
+                }
+
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to process segment " + (i + 1), e);
+            }
+        }
+    }
+
+    @FunctionalInterface
+    public interface InputStreamProvider {
+
+        /**
+         * Provide the segment input stream.
+         *
+         * @param uri           the stream can be selected by a uri or segmentIndex
+         * @param segmentIndex  the stream can be selected by a segmentIndex or uri
+         * @return the segment as InputStream.
+         * @throws IOException  input output error
+         */
+        InputStream get(URI uri, int segmentIndex) throws IOException;
+    }
+
+    /**
+     * Step mode method: Processes a segment by fetching its content and decrypting it if necessary.
+     *
+     * @param segment             The segment to process.
+     * @param segmentIndex        The index of the segment in the playlist.
+     * @param inputStreamProvider provide the InputStream of the segment
+     * @return InputStream containing the processed (decrypted if needed) segment.
+     * @throws IOException        If fetching or decryption fails.
+     */
+    public InputStream processSegment(HlsParser.Segment segment, int segmentIndex, InputStreamProvider inputStreamProvider) throws IOException {
         if (isDownloadCancelled()) {
             throw new DownloadCancelledException("Download cancelled");
         }
 
-        InputStream originalStream = callFetchContent(segment.getUri());
+        InputStream originalStream = inputStreamProvider.get(segment.getUri(), segmentIndex);
 
         if (isDownloadCancelled()) {
-            throw new DownloadCancelledException("Download cancelled during fetch");
+            throw new DownloadCancelledException("Download cancelled during get");
         }
         if (segment.getEncryptionInfo() != null) {
             byte[] key = segment.getEncryptionInfo().getKey();
@@ -423,6 +511,10 @@ public class HlsMediaProcessor {
             }
         }
         return originalStream; // Return original stream if no decryption
+    }
+
+    InputStream processSegment(HlsParser.Segment segment, int segmentIndex) throws IOException {
+        return processSegment(segment, segmentIndex, this::callFetchContent);
     }
 
     /**
@@ -508,7 +600,7 @@ public class HlsMediaProcessor {
         }
 
         @Override
-        public void cleanupState() throws IOException {
+        public void cleanupState() {
             Files.deleteIfExists(stateFile);
             System.out.println("State file cleaned up: " + stateFile);
         }
@@ -592,7 +684,6 @@ public class HlsMediaProcessor {
      * Default implementation of Fetcher using basic HTTP downloading.
      */
     public static class DefaultFetcher implements HlsParser.Fetcher {
-        private static final int MAX_RETRIES = 3;
 
         @Override
         public InputStream fetchContent(URI uri) throws IOException {
