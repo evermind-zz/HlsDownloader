@@ -610,6 +610,13 @@ public class HlsMediaProcessor {
      * Interface for combining segments into a single output file.
      */
     public interface SegmentCombiner {
+        /**
+         * combine the segments into a single files.
+         * @param tsSegments a list of files representing the segments
+         * @param outputDir  in which folder you should operate
+         * @param outputFile the output file that should be used
+         * @throws IOException I/O work
+         */
         void combineSegments(List<File> tsSegments, String outputDir, String outputFile) throws IOException;
     }
 
