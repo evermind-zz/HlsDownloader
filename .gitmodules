@@ -1,0 +1,3 @@
+[submodule "lib/legacy-file-utils"]
+	path = lib/legacy-file-utils
+	url = https://github.com/evermind-zz/legacy-files-utils.git

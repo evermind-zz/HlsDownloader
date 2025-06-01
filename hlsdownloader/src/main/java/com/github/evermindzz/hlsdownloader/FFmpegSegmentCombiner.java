@@ -1,12 +1,14 @@
 package com.github.evermindzz.hlsdownloader;
 
+import com.github.evermindzz.legacyfilesutils.Files;
+import com.github.evermindzz.legacyfilesutils.Files.StandardOpenOption;
+import com.github.evermindzz.legacyfilesutils.Paths;
+
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -28,7 +30,7 @@ public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner 
     /**
      * Combines a list of .ts segment files into a single output file using FFmpeg.
      *
-     * @param tsSegments List of Path objects pointing to the .ts segment files to combine.
+     * @param tsSegments List of File objects pointing to the .ts segment files to combine.
      *                   The order of files must match the intended playback sequence.
      * @param outputDir  The directory where temporary files and the final output will be stored.
      * @param outputFile The full path (including filename and extension) of the resulting file.
@@ -38,7 +40,7 @@ public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner 
      * @throws FFmpegCombinationException If the FFmpeg process is interrupted, times out, or stalls.
      */
     @Override
-    public void combineSegments(List<Path> tsSegments, String outputDir, String outputFile) throws IOException {
+    public void combineSegments(List<File> tsSegments, String outputDir, String outputFile) throws IOException {
         if (tsSegments == null || tsSegments.isEmpty()) {
             throw new IllegalArgumentException("Segment list cannot be null or empty");
         }
@@ -64,17 +66,17 @@ public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner 
     /**
      * Creates a temporary concat list file containing paths to the input .ts files.
      *
-     * @param tsFiles   List of Path objects for the .ts files to include in the concat list.
+     * @param tsFiles   List of File objects for the .ts files to include in the concat list.
      * @param outputDir Directory where the temporary concat list file will be created.
-     * @return Path to the generated concat list file.
+     * @return File to the generated concat list file.
      * @throws IOException If file creation or writing fails.
      */
-    private Path createConcatListFile(List<Path> tsFiles, String outputDir) throws IOException {
-        Path concatFile = Files.createTempFile(Path.of(outputDir), "concat_list", ".lst");
+    private File createConcatListFile(List<File> tsFiles, String outputDir) throws IOException {
+        File concatFile = Files.createTempFile(Paths.get(outputDir), "concat_list", ".lst");
         try (BufferedWriter writer = Files.newBufferedWriter(concatFile, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.CREATE)) {
             writer.write("# FFmpeg concat list\n"); // Optional header for clarity
-            for (Path tsFile : tsFiles) {
-                String escapedPath = tsFile.toAbsolutePath().toString().replace("'", "'\\''"); // Escape single quotes
+            for (File tsFile : tsFiles) {
+                String escapedPath = tsFile.getAbsolutePath().replace("'", "'\\''"); // Escape single quotes
                 writer.write("file '" + escapedPath + "'\n");
             }
         }
@@ -87,16 +89,16 @@ public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner 
      * Monitors FFmpeg output to detect inactivity and terminates the process if no progress
      * is made within {@link #INACTIVITY_THRESHOLD_SECONDS}.
      *
-     * @param tsFiles   List of Path objects for the .ts input files, ordered for playback.
+     * @param tsFiles   List of File objects for the .ts input files, ordered for playback.
      * @param outputDir Directory for temporary files and the output file.
      * @param outputFile The full path (including filename and extension) of the resulting file.
      * @throws IOException          If FFmpeg execution or file operations fail.
      * @throws InterruptedException If the FFmpeg process is interrupted.
      */
-    private void combineTsToContainer(List<Path> tsFiles, String outputDir, String outputFile)
+    private void combineTsToContainer(List<File> tsFiles, String outputDir, String outputFile)
             throws IOException, InterruptedException {
         // Create concat list file
-        Path concatList = createConcatListFile(tsFiles, outputDir);
+        File concatList = createConcatListFile(tsFiles, outputDir);
         Process process = null;
         try (ExecutorService logExecutor = Executors.newSingleThreadExecutor()) {
             AtomicReference<Instant> lastOutputTime = new AtomicReference<>(Instant.now());
@@ -106,7 +108,7 @@ public class FFmpegSegmentCombiner implements HlsMediaProcessor.SegmentCombiner 
                         "ffmpeg",
                         "-f", "concat",
                         "-safe", "0",
-                        "-i", concatList.toAbsolutePath().toString(),
+                        "-i", concatList.getAbsolutePath(),
                         "-c", "copy", // Copy streams without re-encoding
                         "-y",        // Overwrite output file if it exists
                         outputFile

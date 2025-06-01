@@ -3,6 +3,12 @@ plugins {
     id 'maven-publish'
 }
 
+sourceSets {
+    main {
+        java.srcDirs += '../lib/legacy-file-utils/src'
+    }
+}
+
 dependencies {
     testImplementation platform(libs.junit.bom)
     testImplementation libs.junit.jupiter.api

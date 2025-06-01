@@ -4,6 +4,11 @@ import com.github.evermindzz.hlsdownloader.parser.HlsParser;
 import com.github.evermindzz.hlsdownloader.parser.HlsParser.MediaPlaylist;
 import com.github.evermindzz.hlsdownloader.parser.HlsParser.Segment;
 
+import com.github.evermindzz.legacyfilesutils.Files;
+import com.github.evermindzz.legacyfilesutils.Files.StandardCopyOption;
+import com.github.evermindzz.legacyfilesutils.LegacyInputStream;
+import com.github.evermindzz.legacyfilesutils.Paths;
+
 import javax.crypto.Cipher;
 import javax.crypto.CipherInputStream;
 import javax.crypto.spec.IvParameterSpec;
@@ -13,10 +18,6 @@ import java.net.HttpURLConnection;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.security.GeneralSecurityException;
 import java.text.SimpleDateFormat;
 import java.util.*;
@@ -183,8 +184,8 @@ public class HlsMediaProcessor {
             }
         }
         for (HlsParser.EncryptionInfo encryptionInfo : uniqueEncryptionInfos) {
-            try (InputStream keyStream = callFetchContent(encryptionInfo.getUri())) {
-                byte[] key = keyStream.readAllBytes();
+            try (InputStream keyStream = callFetchContent(encryptionInfo.getUri(), UNUSED_INDEX)) {
+                byte[] key = LegacyInputStream.readAllBytes(keyStream);
                 if (key.length != 16) {
                     throw new IOException("Invalid key length: expected 16 bytes, got " + key.length);
                 }
@@ -221,7 +222,7 @@ public class HlsMediaProcessor {
                     handlePause();
                     if (isDownloadCancelled()) return;
 
-                    Path segmentFile = getSegmentFileName(index);
+                    File segmentFile = getSegmentFileName(index);
                     try (InputStream in = processSegment(segment, index)) {
                         if (isDownloadCancelled()) {
                             throw new DownloadCancelledException("Download cancelled during I/O");
@@ -250,7 +251,7 @@ public class HlsMediaProcessor {
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
     }
 
-    private Path getSegmentFileName(int index) {
+    private File getSegmentFileName(int index) {
         return Paths.get(outputDir + "/segment_" + (index + 1) + ".ts");
     }
 
@@ -272,9 +273,9 @@ public class HlsMediaProcessor {
         } else if (isPaused.get()) {
             updateState(DownloadState.PAUSED, "");
         } else {
-            List<Path> tsSegments = new ArrayList<>();
+            List<File> tsSegments = new ArrayList<>();
             for (int i = 0; i < segments.size(); i++) {
-                Path segmentFile = getSegmentFileName(i);
+                File segmentFile = getSegmentFileName(i);
                 if (!Files.exists(segmentFile)) {
                     String message = String.format(ERROR_MISSING_SEGMENT, segmentFile);
                     updateState(DownloadState.ERROR, message);
@@ -480,7 +481,7 @@ public class HlsMediaProcessor {
      * Default implementation of SegmentStateManager using file-based persistence.
      */
     public static class DefaultSegmentStateManager implements SegmentStateManager {
-        private final Path stateFile;
+        private final File stateFile;
 
         public DefaultSegmentStateManager(String stateFile) {
             this.stateFile = Paths.get(stateFile);
@@ -517,7 +518,7 @@ public class HlsMediaProcessor {
      * Interface for combining segments into a single output file.
      */
     public interface SegmentCombiner {
-        void combineSegments(List<Path> tsSegments, String outputDir, String outputFile) throws IOException;
+        void combineSegments(List<File> tsSegments, String outputDir, String outputFile) throws IOException;
     }
 
     /**
@@ -525,11 +526,11 @@ public class HlsMediaProcessor {
      */
     private static class DefaultSegmentCombiner implements SegmentCombiner {
         @Override
-        public void combineSegments(List<Path> tsSegments, String outputDir, String outputFile) throws IOException {
+        public void combineSegments(List<File> tsSegments, String outputDir, String outputFile) throws IOException {
             try (FileOutputStream fos = new FileOutputStream(outputFile, true)) {
-                for (Path tsFile : tsSegments) {
+                for (File tsFile : tsSegments) {
                     if (!Files.exists(tsFile)) continue;
-                    try (FileInputStream fis = new FileInputStream(tsFile.toFile())) {
+                    try (FileInputStream fis = new FileInputStream(tsFile)) {
                         byte[] buffer = new byte[1024];
                         int bytesRead;
                         while ((bytesRead = fis.read(buffer)) != -1) {
