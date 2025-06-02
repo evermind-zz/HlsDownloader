@@ -15,16 +15,6 @@ allprojects {
         mavenCentral()
         maven { url "https://jitpack.io" }
     }
-
-    afterEvaluate {
-        publishing {
-            publications {
-                mavenJava(MavenPublication) {
-                    from components.java
-                }
-            }
-        }
-    }
 }
 
 dependencies {

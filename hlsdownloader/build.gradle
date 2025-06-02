@@ -17,9 +17,38 @@ dependencies {
     testImplementation libs.junit.jupiter.params
 }
 
+// Create the sources JAR, excluding specific directories
+task customSourcesJar(type: Jar) {
+    archiveClassifier = 'sources'
+    from sourceSets.main.allSource
+
+    // Exclude git submodule directories or files
+    exclude 'com/github/evermindzz/legacyfilesutils/**'
+}
+
+// Create the Javadoc JAR, excluding certain packages
+task customJavadocJar(type: Jar) {
+    archiveClassifier = 'javadoc'
+    from javadoc
+
+    // Exclude git submodule packages/classes from the Javadoc
+    exclude 'com/github/evermindzz/legacyfilesutils/**'
+}
+
+// Add them to the publication
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            artifact customSourcesJar
+            artifact customJavadocJar
+        }
+    }
+}
+
 java {
-    withSourcesJar()
-    withJavadocJar()
+    //withSourcesJar()
+    //withJavadocJar()
 }
 
 test {
