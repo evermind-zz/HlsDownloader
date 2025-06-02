@@ -80,12 +80,20 @@ public class HlsMediaProcessor {
      * @param outputDir                 Directory to store temporary segments.
      * @param outputFile                Final output file path for the combined segments.
      * @param fetcher                   Use this fetcher to download segments and keys.
+     *                                  if null {@link DefaultFetcher} is used.
      * @param decryptor                 Use this decryptor to decrypt segments.
+     *                                  if null {@link DefaultDecryptor} is used.
      * @param numThreads                Number of threads to use for parallel downloads.
      * @param segmentStateManager       Handles loading, saving, and cleaning up segment state.
+     *                                  If null {@link DefaultSegmentStateManager} is used.
      * @param segmentCombiner           Handles combining segments.
+     *                                  If null {@link DefaultSegmentCombiner} is used.
      * @param progressCallback          Callback for download progress updates.
+     *                                  If null the user has progress feedback
+     *                                  {@link DownloadProgressCallback}
      * @param stateCallback             Callback for download state changes.
+     *                                  {@link DownloadState}, {@link DownloadStateCallback}
+     *                                  If null the user has no state change progress
      * @param doCleanupSegments         cleanup the downloaded segments files.
      */
     public HlsMediaProcessor(HlsParser parser,
@@ -621,7 +629,7 @@ public class HlsMediaProcessor {
     }
 
     /**
-     * Default implementation of SegmentCombiner.
+     * Default implementation of SegmentCombiner. Just concat files together.
      */
     private static class DefaultSegmentCombiner implements SegmentCombiner {
         @Override
@@ -707,6 +715,11 @@ public class HlsMediaProcessor {
      * Callback interface for download progress updates.
      */
     public interface DownloadProgressCallback {
+        /**
+         * get the progress during segments downloads.
+         * @param progress already completed segments.
+         * @param totalSegments total segments to download.
+         */
         void onProgressUpdate(int progress, int totalSegments);
     }
 
@@ -714,11 +727,15 @@ public class HlsMediaProcessor {
      * Callback interface for download state changes.
      */
     public interface DownloadStateCallback {
+        /**
+         * See the state of the Downloader.
+         * @param state what kind of state happened.
+         * @param message sometimes a message for the user is included.
+         */
         void onDownloadState(DownloadState state, String message);
     }
 
     private static class DownloadCancelledException extends  InterruptedIOException {
-
         public DownloadCancelledException(String msg) {
             super(msg);
         }

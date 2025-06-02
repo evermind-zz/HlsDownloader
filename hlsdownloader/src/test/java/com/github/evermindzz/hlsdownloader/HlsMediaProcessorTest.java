@@ -423,7 +423,9 @@ class HlsMediaProcessorTest {
                         throw new RuntimeException(e);
                     }
                 }),
-                (progress, total) -> {},
+                (progress, total) -> {
+                    System.out.println("progress " + progress + " total " + total);
+                },
                 (state, message) -> {}, false);
 
         downloader.download(URI.create(localTestUri));

@@ -272,6 +272,11 @@ public class HlsParser {
      * Interface to select a variant from a list of available streams in a master playlist.
      */
     public interface MasterPlaylistSelectionCallback {
+        /**
+         * select the {@link VariantStream} you want to parse
+         * @param variants the hls media playlists you have to choose one from
+         * @return the chosen playlist
+         */
         VariantStream onSelectVariant(List<VariantStream> variants);
     }
 
