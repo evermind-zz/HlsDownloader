@@ -359,14 +359,15 @@ public class HlsParser {
     /**
      * Represents a parsed media playlist.
      */
-    public static class MediaPlaylist {
-        List<Segment> segments = new ArrayList<>();
-        double targetDuration;
-        int mediaSequence;
-        String playlistType;
-        boolean endList;
-        boolean independentSegments;
-        MapInfo map;
+    public static class MediaPlaylist implements Serializable {
+        private static final long serialVersionUID = 1L;
+        private List<Segment> segments = new ArrayList<>();
+        private double targetDuration;
+        private int mediaSequence;
+        private String playlistType;
+        private boolean endList;
+        private boolean independentSegments;
+        private MapInfo map;
 
         public void addSegment(Segment segment) {
             segments.add(segment);
@@ -409,10 +410,11 @@ public class HlsParser {
     /**
      * Represents a map section for initialization data.
      */
-    public static class MapInfo {
-        URI uri;
-        long length;
-        long offset;
+    public static class MapInfo implements Serializable {
+        private static final long serialVersionUID = 1L;
+        private URI uri;
+        private long length;
+        private long offset;
 
         public MapInfo(URI uri, long length, long offset) {
             this.uri = uri;
