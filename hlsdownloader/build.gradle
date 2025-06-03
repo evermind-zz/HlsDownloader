@@ -54,3 +54,8 @@ java {
 test {
     useJUnitPlatform()
 }
+
+tasks.named('publishMavenJavaPublicationToMavenLocal') {
+    dependsOn tasks.named('customSourcesJar')
+    dependsOn tasks.named('customJavadocJar')
+}
