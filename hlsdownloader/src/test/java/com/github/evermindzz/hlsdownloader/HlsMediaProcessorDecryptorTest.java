@@ -31,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class HlsMediaProcessorDecryptorTest {
     private Path tempDir;
     private String outputDir;
-    private HlsMediaProcessor downloader;
+    private HlsMediaProcessor hlsMediaProcessor;
     private HlsParser parser;
 
     @BeforeEach
@@ -48,7 +48,7 @@ class HlsMediaProcessorDecryptorTest {
                 true
         );
 
-        downloader = new HlsMediaProcessor(parser, outputDir, tempDir.resolve("output.ts").toString(),
+        hlsMediaProcessor = new HlsMediaProcessor(parser, outputDir, tempDir.resolve("output.ts").toString(),
                 (downloadFetcher != null ? downloadFetcher : new MockEncFetcher()),
                 new HlsMediaProcessor.DefaultDecryptor(),
                 1, new HlsMediaProcessor.DefaultSegmentStateManager(outputDir + "/download_state.txt"),
@@ -69,7 +69,7 @@ class HlsMediaProcessorDecryptorTest {
         HashMap<Integer, TestData>  testDataMap = new HashMap<>();
         testDataMap.put(1, new TestData("AES/CBC/PKCS5Padding", "1234567890abcdef","0xabcdefabcdefabcdefabcdefabcdefab", "https://example.com/key1.key", "http://test/segment1.ts"));
 
-        // setup parser and downloader
+        // setup HlsParser and HlsMediaProcessor
         MockEncFetcher downloadFetcher = new MockEncFetcher(testDataMap);
         setupHLS(null, downloadFetcher);
 
@@ -81,7 +81,7 @@ class HlsMediaProcessorDecryptorTest {
                 new HlsParser.EncryptionInfo("AES-128", URI.create(testDataMap.get(segmentIndex).keyUrl), testDataMap.get(segmentIndex).iv));
         segment.getEncryptionInfo().setKey(testDataMap.get(segmentIndex).key.getBytes());
 
-        try (InputStream decryptedStream = downloader.processSegment(segment, segmentIndex)) {
+        try (InputStream decryptedStream = hlsMediaProcessor.processSegment(segment, segmentIndex)) {
             byte[] decryptedData = decryptedStream.readAllBytes();
             byte[] expectedData = new byte[1024];
             for (int i = 0; i < expectedData.length; i++) {
@@ -97,7 +97,7 @@ class HlsMediaProcessorDecryptorTest {
         HashMap<Integer, TestData>  testDataMap = new HashMap<>();
         testDataMap.put(2, new TestData("AES/CBC/PKCS5Padding", "fedcba0987654321",null, "https://example.com/key2.key", "http://test/segment2.ts"));
 
-        // setup parser and downloader
+        // setup HlsParser and HlsMediaProcessor
         MockEncFetcher downloadFetcher = new MockEncFetcher(testDataMap);
         setupHLS(null, downloadFetcher);
 
@@ -109,7 +109,7 @@ class HlsMediaProcessorDecryptorTest {
                 new HlsParser.EncryptionInfo("AES-128", URI.create(testDataMap.get(segmentIndex).keyUrl), null));
         segment.getEncryptionInfo().setKey(testDataMap.get(segmentIndex).key.getBytes());
 
-        try (InputStream decryptedStream = downloader.processSegment(segment, segmentIndex)) {
+        try (InputStream decryptedStream = hlsMediaProcessor.processSegment(segment, segmentIndex)) {
             byte[] decryptedData = decryptedStream.readAllBytes();
             byte[] expectedData = new byte[1024];
             for (int i = 0; i < expectedData.length; i++) {
@@ -133,7 +133,7 @@ class HlsMediaProcessorDecryptorTest {
         testDataMap.put(1, new TestData("AES/CBC/PKCS5Padding", "1234567890abcdef","0xabcdefabcdefabcdefabcdefabcdefab", "https://example.com/key1.key", "http://test/segment1.ts"));
         testDataMap.put(2, new TestData("AES/CBC/PKCS5Padding", "fedcba0987654321","0x12345678123456781234567812345678", "https://example.com/key2.key", "http://test/segment2.ts"));
 
-        // setup parser and downloader
+        // setup HlsParser and HlsMediaProcessor
         MockEncFetcher downloadFetcher = new MockEncFetcher(testDataMap);
         setupHLS(null, downloadFetcher);
 
@@ -152,8 +152,8 @@ class HlsMediaProcessorDecryptorTest {
                 new HlsParser.EncryptionInfo("AES-128", URI.create(testDataMap.get(segmentIndex2).keyUrl), testDataMap.get(segmentIndex2).iv));
         segment2.getEncryptionInfo().setKey(testDataMap.get(segmentIndex2).key.getBytes());
 
-        try (InputStream decryptedStream1 = downloader.processSegment(segment0, segmentIndex1);
-             InputStream decryptedStream2 = downloader.processSegment(segment2, segmentIndex2)) {
+        try (InputStream decryptedStream1 = hlsMediaProcessor.processSegment(segment0, segmentIndex1);
+             InputStream decryptedStream2 = hlsMediaProcessor.processSegment(segment2, segmentIndex2)) {
             byte[] decryptedData1 = decryptedStream1.readAllBytes();
             byte[] decryptedData2 = decryptedStream2.readAllBytes();
             byte[] expectedData1 = new byte[1024];
@@ -173,7 +173,7 @@ class HlsMediaProcessorDecryptorTest {
         HashMap<Integer, TestData>  testDataMap = new HashMap<>();
         testDataMap.put(1, new TestData("AES/CBC/PKCS5Padding", "1234567890abcdef","0xabcdefabcdefabcdefabcdefabcdefab", "https://example.com/key1.key", "http://test/segment1.ts"));
 
-        // setup parser and downloader
+        // setup HlsParser and HlsMediaProcessor
         MockEncFetcher downloadFetcher = new MockEncFetcher(testDataMap);
         setupHLS(null, downloadFetcher);
 
@@ -185,7 +185,7 @@ class HlsMediaProcessorDecryptorTest {
                 new HlsParser.EncryptionInfo("AES-128", URI.create(testDataMap.get(segmentIndex).keyUrl), testDataMap.get(segmentIndex).iv));
         segment.getEncryptionInfo().setKey("invalid".getBytes()); // 6 bytes, not 16
 
-        assertThrows(IOException.class, () -> downloader.processSegment(segment, segmentIndex),
+        assertThrows(IOException.class, () -> hlsMediaProcessor.processSegment(segment, segmentIndex),
                 "Should throw exception for invalid key length");
     }
 

@@ -72,7 +72,7 @@ public class Main {
     String outputFile = "output.mp4";
     Fetcher defaultFetcher = new HlsMediaProcessor.DefaultFetcher();
     HlsParser = parser = new HlsParser(null /* no variants */, defaultFetcher, true /* strictMode */);
-    HlsMediaProcessor downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+    HlsMediaProcessor hlsMediaProcessor = new HlsMediaProcessor(parser, outputDir, outputFile,
             defaultFetcher,
             null,     // use build in Decryptor
             2,        // two download threads
@@ -90,7 +90,7 @@ public class Main {
     );
 
     // Perform the download and processing at once
-    downloader.download(URI.create(localTestUri));
+    hlsMediaProcessor.download(URI.create(localTestUri));
     // Final file is available at outputDir/outputFile
   }
 }
@@ -121,7 +121,7 @@ public class Main {
             fetcher,
             false // strictMode
     );
-    final HlsMediaProcessor hlsDownloader = new HlsMediaProcessor(
+    final HlsMediaProcessor hlsMediaProcessor = new HlsMediaProcessor(
             parser,
             null, // outputDir not needed
             null, // outputFile not needed
@@ -136,9 +136,9 @@ public class Main {
     );
 
     String playlistUrl = "https://example.com/path/to/playlist.m3u8";
-    List<HlsParser.Segment> segments = hlsDownloader.getPlayListSegmentData(playlistUrl);
+    List<HlsParser.Segment> segments = hlsMediaProcessor.getPlayListSegmentData(playlistUrl);
     // Optional: Retrieve encryption keys if needed
-    hlsDownloader.retrieveEncryptionKeys(segments);
+    hlsMediaProcessor.retrieveEncryptionKeys(segments);
 
     // Serialize segments for later use
     yourSerializer(segments);
@@ -171,7 +171,7 @@ public class Main {
           throws IOException, InterruptedException {
     SegmentInputStreamProvider segmentInputStreamProvider = new SegmentInputStreamProvider(segmentStreams);
     // Setup HlsMediaProcessor
-    HlsMediaProcessor downloader = new HlsMediaProcessor(
+    HlsMediaProcessor hlsMediaProcessor = new HlsMediaProcessor(
             null, // parser not needed; segments set later
             tempDir.getAbsolutePath(),
             remuxedFile.getAbsolutePath(),
@@ -185,9 +185,9 @@ public class Main {
             true      // cleanup temporary files
     );
 
-    downloader.setSegments(segments);
-    downloader.processSegments(segmentInputStreamProvider);
-    downloader.finalizeDownload();
+    hlsMediaProcessor.setSegments(segments);
+    hlsMediaProcessor.processSegments(segmentInputStreamProvider);
+    hlsMediaProcessor.finalizeDownload();
     Files.copy(remuxedFile.toPath(), outputStream);
   }
 

@@ -32,7 +32,7 @@ class HlsMediaProcessorTest {
     private String outputDir;
     private String outputFile;
     private String stateFile;
-    private HlsMediaProcessor downloader;
+    private HlsMediaProcessor hlsMediaProcessor;
     private HlsParser parser;
 
     // Playlist content definitions
@@ -97,7 +97,7 @@ class HlsMediaProcessorTest {
                 fetcher,
                 true
         );
-        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+        hlsMediaProcessor = new HlsMediaProcessor(parser, outputDir, outputFile,
                 fetcher, decryptor,
                 numThreads,
                 new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
@@ -109,7 +109,7 @@ class HlsMediaProcessorTest {
     @Test
     void testSuccessfulDownload() throws IOException {
         initHls(DEFAULT_PLAYLIST);
-        downloader.download(URI.create("http://test/media.m3u8"));
+        hlsMediaProcessor.download(URI.create("http://test/media.m3u8"));
 
         assertTrue(Files.exists(Path.of(outputFile)), "Output file should exist");
         assertFalse(Files.exists(Path.of(stateFile)), "State file should be cleaned up");
@@ -132,7 +132,7 @@ class HlsMediaProcessorTest {
                 true
         );
         HlsMediaProcessor.DownloadStateCallback callback = new DownloadStateLogger();
-        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+        hlsMediaProcessor = new HlsMediaProcessor(parser, outputDir, outputFile,
                 new MockFetcher(TWO_SEGMENT_PLAYLIST, barrier), // Pass the barrier to MockFetcher
                 new MockDecryptor(),
                 2, // Use 2 threads to simulate concurrency
@@ -149,7 +149,7 @@ class HlsMediaProcessorTest {
                             fail("Barrier await failed: " + e.getMessage());
                         }
                         // At this point, both threads are at the barrier (one has written segment_1.ts, the other is waiting)
-                        downloader.cancel(); // Cancel the download
+                        hlsMediaProcessor.cancel(); // Cancel the download
                     }
                 },
                 (state, message) -> {
@@ -162,7 +162,7 @@ class HlsMediaProcessorTest {
 
         Thread downloadThread = new Thread(() -> {
             try {
-                downloader.download(URI.create("http://test/media.m3u8"));
+                hlsMediaProcessor.download(URI.create("http://test/media.m3u8"));
             } catch (IOException e) {
                 // Ignore expected InterruptedIOException due to cancellation
                 if (!e.getMessage().contains("Download cancelled")) {
@@ -181,7 +181,7 @@ class HlsMediaProcessorTest {
         }
 
         // At this point, both threads are at the barrier (one has written segment_1.ts, the other is waiting)
-        //downloader.cancel(); // Cancel the download
+        //mediaProcessor.cancel(); // Cancel the download
 
         downloadThread.join(2000); // Allow cancellation to complete
 
@@ -212,7 +212,7 @@ class HlsMediaProcessorTest {
 
         initHls(DEFAULT_PLAYLIST, fetcher, decryptor, 2);
 
-        downloader.download(URI.create("http://test/media.m3u8"));
+        hlsMediaProcessor.download(URI.create("http://test/media.m3u8"));
 
         assertTrue(Files.exists(Path.of(outputFile)));
         assertFalse(Files.exists(Path.of(stateFile)));
@@ -244,7 +244,7 @@ class HlsMediaProcessorTest {
         CyclicBarrier barrier = new CyclicBarrier(3);
         AtomicInteger segmentCounter = new AtomicInteger(0);
 
-        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+        hlsMediaProcessor = new HlsMediaProcessor(parser, outputDir, outputFile,
                 new MockFetcher(TWO_SEGMENT_PLAYLIST, barrier),
                 new MockDecryptor(),
                 2, // Use 2 threads to simulate concurrency
@@ -261,14 +261,14 @@ class HlsMediaProcessorTest {
                             fail("Barrier await failed: " + e.getMessage());
                         }
 
-                        downloader.cancel(); // Cancel the download
+                        hlsMediaProcessor.cancel(); // Cancel the download
                     }
                 },
                 (state, message) -> {}, false);
 
         Thread downloadThread = new Thread(() -> {
             try {
-                downloader.download(URI.create("http://test/media.m3u8"));
+                hlsMediaProcessor.download(URI.create("http://test/media.m3u8"));
             } catch (IOException e) {
                 // Ignore expected InterruptedIOException due to cancellation
                 if (!e.getMessage().contains("Download cancelled")) {
@@ -307,7 +307,7 @@ class HlsMediaProcessorTest {
         AtomicReference<HlsMediaProcessor.DownloadState> lastState = new AtomicReference<>();
         AtomicReference<String> lastMessage = new AtomicReference<>();
 
-        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+        hlsMediaProcessor = new HlsMediaProcessor(parser, outputDir, outputFile,
                 new MockFetcher(emptyPlaylist),
                 new MockDecryptor(),
                 2,
@@ -320,7 +320,7 @@ class HlsMediaProcessorTest {
                 }, false);
 
         try {
-            downloader.download(URI.create("http://test/media.m3u8"));
+            hlsMediaProcessor.download(URI.create("http://test/media.m3u8"));
             fail("Should throw IOException for empty playlist");
         } catch (IOException e) {
             assertEquals(HlsMediaProcessor.DownloadState.ERROR, lastState.get(), "Should notify ERROR state");
@@ -413,7 +413,7 @@ class HlsMediaProcessorTest {
         outputFile += ".mp4";
         Fetcher defaultFetcher = new HlsMediaProcessor.DefaultFetcher();
         parser = new HlsParser(null, defaultFetcher, true);
-        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+        hlsMediaProcessor = new HlsMediaProcessor(parser, outputDir, outputFile,
                 defaultFetcher, null,
                 2,
                 new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
@@ -429,7 +429,7 @@ class HlsMediaProcessorTest {
                 },
                 (state, message) -> {}, false);
 
-        downloader.download(URI.create(localTestUri));
+        hlsMediaProcessor.download(URI.create(localTestUri));
 
         assertTrue(Files.exists(Path.of(outputFile)));
         assertFalse(Files.exists(Path.of(stateFile)));
@@ -450,7 +450,7 @@ class HlsMediaProcessorTest {
         initHls(DEFAULT_PLAYLIST, failingFetcher, new MockDecryptor(), 2);
 
         try {
-            downloader.download(URI.create("http://test/media.m3u8"));
+            hlsMediaProcessor.download(URI.create("http://test/media.m3u8"));
             fail("Should throw IOException due to simulated failure");
         } catch (IOException e) {
             assertTrue(e.getMessage().contains("Simulated connection failure"), "Should catch the simulated failure but was: " + e.getMessage());
@@ -473,7 +473,7 @@ class HlsMediaProcessorTest {
         };
         initHls(SINGLE_SEGMENT_PLAYLIST, socketFailingFetcher, new MockDecryptor(), 1);
 
-        downloader.download(URI.create("http://test/media.m3u8"));
+        hlsMediaProcessor.download(URI.create("http://test/media.m3u8"));
 
         assertTrue(Files.exists(Path.of(outputFile)), "Output file should exist after retries");
         assertFalse(Files.exists(Path.of(stateFile)), "State file should be cleaned up");
@@ -487,11 +487,11 @@ class HlsMediaProcessorTest {
         int segmentIndex = 1;
         testDataMap.put(segmentIndex, new HlsMediaProcessorDecryptorTest.TestData("AES/CBC/PKCS5Padding", "1234567890abcdef","0xabcdef1234567890abcdef1234567890", "https://example.com/key1.key", "http://test/segment1.ts"));
 
-        // setup parser and downloader
+        // setup HlsParser and HlsMediaProcessor
         HlsMediaProcessorDecryptorTest.MockEncFetcher defaultFetcher = new HlsMediaProcessorDecryptorTest.MockEncFetcher(testDataMap, SINGLE_SEGMENT_PLAYLIST);
 
         parser = new HlsParser(null, defaultFetcher, true);
-        downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
+        hlsMediaProcessor = new HlsMediaProcessor(parser, outputDir, outputFile,
                 defaultFetcher, new HlsMediaProcessor.DefaultDecryptor(),
                 1,
                 new HlsMediaProcessor.DefaultSegmentStateManager(stateFile),
@@ -499,7 +499,7 @@ class HlsMediaProcessorTest {
                 (progress, total) -> {},
                 (state, message) -> {}, false);
 
-        downloader.download(URI.create("http://test/media.m3u8"));
+        hlsMediaProcessor.download(URI.create("http://test/media.m3u8"));
 
         assertTrue(Files.exists(Path.of(outputFile)), "Output file should exist");
 
