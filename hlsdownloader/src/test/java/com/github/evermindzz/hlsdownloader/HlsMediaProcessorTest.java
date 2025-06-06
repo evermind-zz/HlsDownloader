@@ -1,5 +1,6 @@
 package com.github.evermindzz.hlsdownloader;
 
+import com.github.evermindzz.hlsdownloader.common.Fetcher;
 import com.github.evermindzz.hlsdownloader.parser.HlsParser;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -87,7 +88,7 @@ class HlsMediaProcessorTest {
         initHls(playlistContent, new MockFetcher(playlistContent), new MockDecryptor(), 2);
     }
 
-    private void initHls(String playlistContent, HlsParser.Fetcher fetcher, HlsMediaProcessor.Decryptor decryptor, int numThreads) {
+    private void initHls(String playlistContent, Fetcher fetcher, HlsMediaProcessor.Decryptor decryptor, int numThreads) {
         parser = new HlsParser(
                 variants -> {
                     fail("Should not be called for media playlist");
@@ -335,7 +336,7 @@ class HlsMediaProcessorTest {
                 .count();
     }
 
-    private static class MockFetcher implements HlsParser.Fetcher {
+    private static class MockFetcher implements Fetcher {
         final String content;
         protected final AtomicInteger segmentCounter = new AtomicInteger(0);
         private final CyclicBarrier barrier;
@@ -410,7 +411,7 @@ class HlsMediaProcessorTest {
         String localTestUri = "http://localhost:2002/input_hls/playlist.m3u8";
         //String localTestUri = "https://1a-1791.com/video/fww1/60/s8/2/V/J/m/J/VJmJy.haa.rec.tar?r_file=chunklist.m3u8&r_type=application%2Fvnd.apple.mpegurl&r_range=434384896-434393686";
         outputFile += ".mp4";
-        HlsParser.Fetcher defaultFetcher = new HlsMediaProcessor.DefaultFetcher();
+        Fetcher defaultFetcher = new HlsMediaProcessor.DefaultFetcher();
         parser = new HlsParser(null, defaultFetcher, true);
         downloader = new HlsMediaProcessor(parser, outputDir, outputFile,
                 defaultFetcher, null,

@@ -1,5 +1,6 @@
 package com.github.evermindzz.hlsdownloader.parser;
 
+import com.github.evermindzz.hlsdownloader.common.Fetcher;
 import com.github.evermindzz.hlsdownloader.parser.HlsParser.VariantStream;
 import com.github.evermindzz.hlsdownloader.parser.HlsParser.EncryptionInfo;
 
@@ -377,7 +378,7 @@ class HlsParserTest {
 
     }
 
-    static class MockFetcher implements HlsParser.Fetcher {
+    static class MockFetcher implements Fetcher {
         final String content;
 
         MockFetcher(String content) {

@@ -1,5 +1,6 @@
 package com.github.evermindzz.hlsdownloader;
 
+import com.github.evermindzz.hlsdownloader.common.Fetcher;
 import com.github.evermindzz.hlsdownloader.parser.HlsParser;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,7 +41,7 @@ class HlsMediaProcessorDecryptorTest {
         setupHLS(null, null);
     }
 
-    private void setupHLS(HlsParser.Fetcher parserFetcher, HlsParser.Fetcher downloadFetcher) {
+    private void setupHLS(Fetcher parserFetcher, Fetcher downloadFetcher) {
         parser = new HlsParser(
                 variants -> null,
                 (parserFetcher != null ? parserFetcher : new MockEncFetcher()),
@@ -188,7 +189,7 @@ class HlsMediaProcessorDecryptorTest {
                 "Should throw exception for invalid key length");
     }
 
-    public static class MockEncFetcher implements HlsParser.Fetcher {
+    public static class MockEncFetcher implements Fetcher {
 
         private HashMap<Integer, TestData> testDataMap = null;
         private String playlist = null;

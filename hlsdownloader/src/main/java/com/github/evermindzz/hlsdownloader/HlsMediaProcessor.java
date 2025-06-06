@@ -1,5 +1,6 @@
 package com.github.evermindzz.hlsdownloader;
 
+import com.github.evermindzz.hlsdownloader.common.Fetcher;
 import com.github.evermindzz.hlsdownloader.parser.HlsParser;
 import com.github.evermindzz.hlsdownloader.parser.HlsParser.MediaPlaylist;
 import com.github.evermindzz.hlsdownloader.parser.HlsParser.Segment;
@@ -42,7 +43,7 @@ public class HlsMediaProcessor {
     private final AtomicBoolean isCancelled;
     private final AtomicBoolean isPaused;
     private final AtomicBoolean cancellationRequested;
-    private final HlsParser.Fetcher fetcher;
+    private final Fetcher fetcher;
     private final Decryptor decryptor;
     private final int numThreads;
     private final boolean doCleanupSegments;
@@ -99,7 +100,7 @@ public class HlsMediaProcessor {
     public HlsMediaProcessor(HlsParser parser,
                          String outputDir,
                          String outputFile,
-                         HlsParser.Fetcher fetcher,
+                         Fetcher fetcher,
                          Decryptor decryptor,
                          int numThreads,
                          SegmentStateManager segmentStateManager,
@@ -698,7 +699,7 @@ public class HlsMediaProcessor {
     /**
      * Default implementation of Fetcher using basic HTTP downloading.
      */
-    public static class DefaultFetcher implements HlsParser.Fetcher {
+    public static class DefaultFetcher implements Fetcher {
 
         @Override
         public InputStream fetchContent(URI uri) throws IOException {
